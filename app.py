@@ -19,7 +19,7 @@ SHEET_NAME = "Dashboard_Ready_Data_v2"
 
 st.set_page_config(
     page_title="University Performance Dashboard",
-    page_icon="📊",
+    page_icon="bar_chart",
     layout="wide",
 )
 
@@ -68,12 +68,26 @@ def selected_context(row: pd.Series) -> dict:
 
 
 def generate_ai_interpretation(context: dict, user_question: str | None = None) -> str:
-    try:
-        api_key = st.secrets.get("OPENAI_API_KEY", None)
-    except Exception:
-        api_key = None
+    """Generate AI interpretation if a valid API key exists; otherwise use local fallback.
 
-    if OpenAI is None or not api_key:
+    This version prevents crashes caused by invalid Streamlit secrets, for example
+    when OPENAI_API_KEY contains non-ASCII placeholder text instead of a real key.
+    """
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY", "")
+    except Exception:
+        api_key = ""
+
+    api_key = str(api_key).strip().strip('"').strip("'")
+
+    # If no valid key is configured, keep the dashboard working with local interpretation.
+    if OpenAI is None or not api_key or not api_key.startswith(("sk-", "sk-proj-")):
+        return generate_local_interpretation(context, user_question)
+
+    # HTTP headers must be ASCII. A Cyrillic placeholder in secrets causes UnicodeEncodeError.
+    try:
+        api_key.encode("ascii")
+    except UnicodeEncodeError:
         return generate_local_interpretation(context, user_question)
 
     client = OpenAI(api_key=api_key)
@@ -89,11 +103,21 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
         "selected_context": context,
         "user_question": user_question,
     }
-    response = client.responses.create(
-        model="gpt-4.1-mini",
-        input=json.dumps(prompt, ensure_ascii=False),
-    )
-    return response.output_text
+
+    try:
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=json.dumps(prompt, ensure_ascii=True),
+        )
+        return response.output_text
+    except Exception as error:
+        fallback = generate_local_interpretation(context, user_question)
+        return (
+            fallback
+            + "\n\n**Technical note**\n\n"
+            + "The local dashboard interpretation was shown because the external AI API call failed. "
+            + f"Error type: `{type(error).__name__}`."
+        )
 
 
 def score_label(value: float) -> str:
@@ -200,7 +224,7 @@ context = selected_context(selected)
 main_col, ai_col = st.columns([3, 1], gap="large")
 
 with main_col:
-    st.subheader(f"{university} · {year}")
+    st.subheader(f"{university} - {year}")
 
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Overall score", f"{selected['overall_score']:.1f}")
@@ -257,10 +281,10 @@ with main_col:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("#### Performance Profile")
-        st.altair_chart(score_chart, use_container_width=True)
+        st.altair_chart(score_chart, width="stretch")
     with c2:
         st.markdown("#### Benchmark Comparison")
-        st.altair_chart(benchmark_chart, use_container_width=True)
+        st.altair_chart(benchmark_chart, width="stretch")
 
     trend = df[df["university"] == university].sort_values("year")
     trend_chart = (
@@ -274,7 +298,7 @@ with main_col:
         .properties(height=260)
     )
     st.markdown("#### Overall Score Over Time")
-    st.altair_chart(trend_chart, use_container_width=True)
+    st.altair_chart(trend_chart, width="stretch")
 
     scatter = (
         alt.Chart(filtered)
@@ -296,10 +320,10 @@ with main_col:
         .properties(height=340)
     )
     st.markdown("#### Finance Explorer: Funding Intensity vs Overall Score")
-    st.altair_chart(scatter, use_container_width=True)
+    st.altair_chart(scatter, width="stretch")
 
     st.markdown("#### Selected Data")
-    st.dataframe(pd.DataFrame([context]), use_container_width=True)
+    st.dataframe(pd.DataFrame([context]), width="stretch")
 
 with ai_col:
     st.subheader("AI Analysis Companion")
@@ -328,4 +352,3 @@ with ai_col:
         "The AI assistant supports interpretation only. It does not provide causal conclusions "
         "or autonomous policy recommendations."
     )
-
