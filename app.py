@@ -13,7 +13,6 @@ try:
 except ImportError:
     OpenAI = None
 
-
 DATA_PATH = Path("data/university_dashboard_ready_dataset_v2_checked.xlsx")
 SHEET_NAME = "Dashboard_Ready_Data_v2"
 
@@ -21,6 +20,22 @@ st.set_page_config(
     page_title="University Performance Dashboard",
     page_icon=":bar_chart:",
     layout="wide",
+)
+
+st.markdown(
+    """
+    <style>
+    .block-container {padding-top: 1.6rem; padding-bottom: 2rem;}
+    .small-note {color: #7a7f8a; font-size: 0.92rem;}
+    .metric-card {
+        border: 1px solid rgba(49, 51, 63, 0.12);
+        border-radius: 12px;
+        padding: 1rem;
+        background: rgba(250, 250, 250, 0.65);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 
@@ -41,7 +56,34 @@ def clean_value(value: Any) -> Any:
     return str(value)
 
 
-def selected_context(row: pd.Series) -> dict:
+def format_number(value: Any, decimals: int = 1) -> str:
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{float(value):,.{decimals}f}"
+
+
+def is_valid_api_key(api_key: Any) -> bool:
+    if not isinstance(api_key, str):
+        return False
+    api_key = api_key.strip()
+    if not api_key:
+        return False
+    try:
+        api_key.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return api_key.startswith("sk-") and len(api_key) > 20
+
+
+def score_label(value: float) -> str:
+    if value >= 70:
+        return "high"
+    if value >= 55:
+        return "moderate"
+    return "low"
+
+
+def selected_context(row: pd.Series, view_type: str = "University Profile") -> dict:
     fields = [
         "university",
         "year",
@@ -71,137 +113,29 @@ def selected_context(row: pd.Series) -> dict:
         "citations_per_publication",
         "h_index",
     ]
-    return {field: clean_value(row.get(field)) for field in fields if field in row.index}
+    context = {field: clean_value(row.get(field)) for field in fields if field in row.index}
+    context["view_type"] = view_type
+    return context
 
 
-def is_valid_api_key(api_key: Any) -> bool:
-    if not isinstance(api_key, str):
-        return False
-    api_key = api_key.strip()
-    if not api_key:
-        return False
-    try:
-        api_key.encode("ascii")
-    except UnicodeEncodeError:
-        return False
-    return api_key.startswith("sk-") and len(api_key) > 20
-
-
-def score_label(value: float) -> str:
-    if value >= 70:
-        return "high"
-    if value >= 55:
-        return "moderate"
-    return "low"
-
-
-def generate_local_interpretation(
-    context: dict, user_question: str | None = None, technical_note: str | None = None
-) -> str:
-    overall = float(context.get("overall_score") or 0)
-    teaching = float(context.get("teaching_score") or 0)
-    placement = float(context.get("placement_score") or 0)
-    research = float(context.get("research_score") or 0)
-    financial = float(context.get("financial_score") or 0)
-    national = float(context.get("national_avg_overall_score") or 0)
-    macro = float(context.get("macro_area_avg_overall_score") or 0)
-    rank = int(context.get("overall_rank_year") or 0)
-
-    dimensions = {
-        "teaching": teaching,
-        "placement": placement,
-        "research": research,
-        "financial": financial,
+def make_overview_context(filtered: pd.DataFrame, year: int, macro_area: str, region: str, size_class: str) -> dict:
+    top = filtered.sort_values("overall_score", ascending=False).head(3)
+    bottom = filtered.sort_values("overall_score", ascending=True).head(3)
+    return {
+        "view_type": "Overview",
+        "year": int(year),
+        "macro_area_filter": macro_area,
+        "region_filter": region,
+        "size_class_filter": size_class,
+        "number_of_universities": int(filtered["university"].nunique()),
+        "average_overall_score": clean_value(filtered["overall_score"].mean()),
+        "average_teaching_score": clean_value(filtered["teaching_score"].mean()),
+        "average_placement_score": clean_value(filtered["placement_score"].mean()),
+        "average_research_score": clean_value(filtered["research_score"].mean()),
+        "average_financial_score": clean_value(filtered["financial_score"].mean()),
+        "top_universities": top[["university", "overall_score", "overall_rank_year"]].to_dict("records"),
+        "lowest_universities": bottom[["university", "overall_score", "overall_rank_year"]].to_dict("records"),
     }
-    strongest = max(dimensions, key=dimensions.get)
-    weakest = min(dimensions, key=dimensions.get)
-    national_gap = overall - national
-    macro_gap = overall - macro
-
-    benchmark_sentence = (
-        f"The overall score is {abs(national_gap):.1f} points "
-        f"{'above' if national_gap >= 0 else 'below'} the national average and "
-        f"{abs(macro_gap):.1f} points {'above' if macro_gap >= 0 else 'below'} the macro-area average."
-    )
-
-    question_note = ""
-    if user_question:
-        question_note = (
-            f"\n\n**User question**\n\n{user_question}\n\n"
-            "Based on the selected indicators, the answer should focus only on the current score profile, "
-            "benchmarks, and visual patterns. The dashboard does not provide causal evidence."
-        )
-
-    tech = ""  # Technical notes are kept out of the presentation view.
-
-    return f"""
-**Short summary**
-
-{context.get('university')} in {context.get('year')} has a {score_label(overall)} overall profile with an overall score of **{overall:.1f}** and rank **{rank}/61**. {benchmark_sentence}
-
-**Strengths**
-
-- The strongest dimension is **{strongest}** with a score of **{dimensions[strongest]:.1f}**.
-- The profile should be interpreted together with the university size class: **{context.get('size_class')}**.
-
-**Weaknesses / points to monitor**
-
-- The weakest dimension is **{weakest}** with a score of **{dimensions[weakest]:.1f}**.
-- The financial profile should be checked together with FFO per student, operating cost per student, and personnel cost share.
-
-**Suggested next visual exploration**
-
-Compare this university with other institutions in **{context.get('region')}** and **{context.get('macro_area')}**, then inspect whether the same pattern appears across 2020-2023.
-
-**Important limitation**
-
-This is a dashboard-based interpretation. It does not imply causality or policy recommendations.{question_note}
-"""
-
-
-def generate_ai_interpretation(context: dict, user_question: str | None = None) -> str:
-    try:
-        api_key = st.secrets.get("OPENAI_API_KEY", None)
-    except Exception:
-        api_key = None
-
-    if OpenAI is None:
-        return generate_local_interpretation(context, user_question, "The OpenAI package is not installed.")
-
-    if not is_valid_api_key(api_key):
-        return generate_local_interpretation(
-            context,
-            user_question,
-            "No valid external API key was found. Local dashboard interpretation was shown instead.",
-        )
-
-    client = OpenAI(api_key=api_key.strip())
-    prompt = {
-        "task": "Interpret the selected university dashboard profile.",
-        "rules": [
-            "Use only the provided dashboard context.",
-            "Do not invent missing values.",
-            "Do not make causal claims.",
-            "Write in concise academic English.",
-            "Return: short summary, strengths, weaknesses, benchmark comparison, suggested next visual exploration.",
-        ],
-        "selected_context": context,
-        "user_question": user_question,
-    }
-
-    try:
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=json.dumps(prompt, ensure_ascii=True),
-        )
-        return response.output_text
-    except Exception as exc:
-        return generate_local_interpretation(
-            context,
-            user_question,
-            f"The external AI API call failed. Error type: {type(exc).__name__}.",
-        )
-
 
 
 def comparison_context(row_a: pd.Series, row_b: pd.Series) -> dict:
@@ -220,171 +154,37 @@ def comparison_context(row_a: pd.Series, row_b: pd.Series) -> dict:
         "ffo_per_student",
         "operating_cost_per_student",
         "personnel_cost_share",
+        "public_revenue_share",
+        "student_contribution_share",
+        "performance_quota_share",
+        "economic_financial_sustainability_index",
         "student_staff_ratio",
         "employment_index",
+        "graduation_intensity",
         "publications_per_teaching_staff",
         "citations_per_publication",
         "h_index",
     ]
+    a = {field: clean_value(row_a.get(field)) for field in fields if field in row_a.index}
+    b = {field: clean_value(row_b.get(field)) for field in fields if field in row_b.index}
+    score_gaps = {
+        "overall_gap_a_minus_b": clean_value(row_a.get("overall_score") - row_b.get("overall_score")),
+        "teaching_gap_a_minus_b": clean_value(row_a.get("teaching_score") - row_b.get("teaching_score")),
+        "placement_gap_a_minus_b": clean_value(row_a.get("placement_score") - row_b.get("placement_score")),
+        "research_gap_a_minus_b": clean_value(row_a.get("research_score") - row_b.get("research_score")),
+        "financial_gap_a_minus_b": clean_value(row_a.get("financial_score") - row_b.get("financial_score")),
+    }
     return {
-        "comparison_year": clean_value(row_a.get("year")),
-        "university_a": {field: clean_value(row_a.get(field)) for field in fields if field in row_a.index},
-        "university_b": {field: clean_value(row_b.get(field)) for field in fields if field in row_b.index},
+        "view_type": "University Comparison",
+        "year": clean_value(row_a.get("year")),
+        "university_a": a,
+        "university_b": b,
+        "score_gaps_a_minus_b": score_gaps,
     }
 
 
-def generate_local_comparison_interpretation(context: dict, user_question: str | None = None) -> str:
-    a = context["university_a"]
-    b = context["university_b"]
-    dims = ["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"]
-
-    def f(x: Any) -> float:
-        return float(x or 0)
-
-    a_name = a.get("university")
-    b_name = b.get("university")
-    year_value = context.get("comparison_year")
-    a_overall = f(a.get("overall_score"))
-    b_overall = f(b.get("overall_score"))
-    overall_gap = a_overall - b_overall
-    leader = a_name if overall_gap >= 0 else b_name
-    lagger = b_name if overall_gap >= 0 else a_name
-
-    gap_rows = []
-    for dim in dims:
-        gap_rows.append((dim.replace("_score", ""), f(a.get(dim)) - f(b.get(dim))))
-    largest_gap_dim, largest_gap = max(gap_rows, key=lambda x: abs(x[1]))
-
-    a_strongest = max(dims[1:], key=lambda dim: f(a.get(dim))).replace("_score", "")
-    b_strongest = max(dims[1:], key=lambda dim: f(b.get(dim))).replace("_score", "")
-    a_weakest = min(dims[1:], key=lambda dim: f(a.get(dim))).replace("_score", "")
-    b_weakest = min(dims[1:], key=lambda dim: f(b.get(dim))).replace("_score", "")
-
-    question_note = ""
-    if user_question:
-        question_note = (
-            f"\n\n**User question**\n\n{user_question}\n\n"
-            "The answer is based only on the selected dashboard indicators and should not be interpreted as causal evidence."
-        )
-
-    return f"""
-**Short comparison summary**
-
-In {year_value}, **{leader}** has the higher overall score. The overall gap between **{a_name}** and **{b_name}** is **{abs(overall_gap):.1f}** points, with **{lagger}** lower on the selected overall profile.
-
-**Main difference visible in the charts**
-
-- The largest score gap is in **{largest_gap_dim}**, equal to **{abs(largest_gap):.1f}** points.
-- **{a_name}** is strongest in **{a_strongest}** and weakest in **{a_weakest}**.
-- **{b_name}** is strongest in **{b_strongest}** and weakest in **{b_weakest}**.
-
-**What to inspect next**
-
-Compare the financial indicators, especially FFO per student, operating cost per student, and personnel cost share. Then check the time trend to see whether the gap is stable or only appears in {year_value}.
-
-**Important limitation**
-
-This comparison is exploratory and dashboard-based. It does not imply causality or policy recommendations.{question_note}
-"""
-
-
-def generate_ai_comparison_interpretation(context: dict, user_question: str | None = None) -> str:
-    try:
-        api_key = st.secrets.get("OPENAI_API_KEY", None)
-    except Exception:
-        api_key = None
-
-    if OpenAI is None or not is_valid_api_key(api_key):
-        return generate_local_comparison_interpretation(context, user_question)
-
-    client = OpenAI(api_key=api_key.strip())
-    prompt = {
-        "task": "Compare two universities in the selected dashboard year.",
-        "rules": [
-            "Use only the provided dashboard context.",
-            "Do not invent missing values.",
-            "Do not make causal claims.",
-            "Write in concise academic English.",
-            "Return: short comparison summary, main visible differences, strengths and weaknesses, suggested next visual exploration.",
-        ],
-        "selected_comparison_context": context,
-        "user_question": user_question,
-    }
-
-    try:
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=json.dumps(prompt, ensure_ascii=True),
-        )
-        return response.output_text
-    except Exception:
-        return generate_local_comparison_interpretation(context, user_question)
-
-
-def make_comparison_score_chart(row_a: pd.Series, row_b: pd.Series) -> alt.Chart:
-    chart_df = pd.DataFrame(
-        [
-            {"University": row_a["university"], "Dimension": "Overall", "Score": row_a["overall_score"]},
-            {"University": row_a["university"], "Dimension": "Teaching", "Score": row_a["teaching_score"]},
-            {"University": row_a["university"], "Dimension": "Placement", "Score": row_a["placement_score"]},
-            {"University": row_a["university"], "Dimension": "Research", "Score": row_a["research_score"]},
-            {"University": row_a["university"], "Dimension": "Financial", "Score": row_a["financial_score"]},
-            {"University": row_b["university"], "Dimension": "Overall", "Score": row_b["overall_score"]},
-            {"University": row_b["university"], "Dimension": "Teaching", "Score": row_b["teaching_score"]},
-            {"University": row_b["university"], "Dimension": "Placement", "Score": row_b["placement_score"]},
-            {"University": row_b["university"], "Dimension": "Research", "Score": row_b["research_score"]},
-            {"University": row_b["university"], "Dimension": "Financial", "Score": row_b["financial_score"]},
-        ]
-    )
-    return (
-        alt.Chart(chart_df)
-        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
-        .encode(
-            x=alt.X("Dimension:N", sort=["Overall", "Teaching", "Placement", "Research", "Financial"], title="Dimension"),
-            xOffset="University:N",
-            y=alt.Y("Score:Q", scale=alt.Scale(domain=[0, 100]), title="Score"),
-            color=alt.Color("University:N", title="University"),
-            tooltip=["University", "Dimension", alt.Tooltip("Score:Q", format=".1f")],
-        )
-        .properties(height=340)
-    )
-
-
-def make_comparison_gap_chart(row_a: pd.Series, row_b: pd.Series) -> alt.Chart:
-    a_name = row_a["university"]
-    b_name = row_b["university"]
-    chart_df = pd.DataFrame(
-        {
-            "Dimension": ["Overall", "Teaching", "Placement", "Research", "Financial"],
-            "Gap": [
-                row_a["overall_score"] - row_b["overall_score"],
-                row_a["teaching_score"] - row_b["teaching_score"],
-                row_a["placement_score"] - row_b["placement_score"],
-                row_a["research_score"] - row_b["research_score"],
-                row_a["financial_score"] - row_b["financial_score"],
-            ],
-        }
-    )
-    chart_df["Interpretation"] = chart_df["Gap"].apply(lambda x: f"{a_name} higher" if x >= 0 else f"{b_name} higher")
-    return (
-        alt.Chart(chart_df)
-        .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
-        .encode(
-            y=alt.Y("Dimension:N", sort=["Overall", "Teaching", "Placement", "Research", "Financial"], title="Dimension"),
-            x=alt.X("Gap:Q", title=f"Score gap: {a_name} minus {b_name}"),
-            color=alt.Color("Interpretation:N", title="Direction"),
-            tooltip=["Dimension", alt.Tooltip("Gap:Q", format="+.1f"), "Interpretation"],
-        )
-        .properties(height=300)
-    )
-
-
-def metric_card(label: str, value: Any, help_text: str | None = None) -> None:
-    st.metric(label, value, help=help_text)
-
-
-def make_score_profile_chart(row: pd.Series) -> alt.Chart:
-    score_df = pd.DataFrame(
+def make_score_profile(row: pd.Series) -> pd.DataFrame:
+    return pd.DataFrame(
         {
             "Dimension": ["Teaching", "Placement", "Research", "Financial"],
             "Score": [
@@ -395,12 +195,211 @@ def make_score_profile_chart(row: pd.Series) -> alt.Chart:
             ],
         }
     )
+
+
+def make_indicator_bar(row: pd.Series, indicators: dict[str, str]) -> alt.Chart:
+    data = []
+    for col, label in indicators.items():
+        if col in row.index and pd.notna(row[col]):
+            data.append({"Indicator": label, "Value": float(row[col])})
+    chart_df = pd.DataFrame(data)
+    if chart_df.empty:
+        chart_df = pd.DataFrame({"Indicator": ["No data"], "Value": [0]})
+    return (
+        alt.Chart(chart_df)
+        .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+        .encode(
+            y=alt.Y("Indicator:N", sort="-x", title=None),
+            x=alt.X("Value:Q", title="Value"),
+            tooltip=["Indicator", alt.Tooltip("Value:Q", format=",.2f")],
+        )
+        .properties(height=max(260, 38 * len(chart_df)))
+    )
+
+
+def local_overview_interpretation(context: dict, user_question: str | None = None) -> str:
+    top_names = ", ".join([x["university"] for x in context.get("top_universities", [])])
+    low_names = ", ".join([x["university"] for x in context.get("lowest_universities", [])])
+    avg = float(context.get("average_overall_score") or 0)
+    q = f"\n\n**User question**\n\n{user_question}" if user_question else ""
+    return f"""
+**Overview interpretation**
+
+The current overview page shows **{context.get('number_of_universities')} universities** for **{context.get('year')}** after applying the selected filters. The average overall score in this filtered view is **{avg:.1f}**.
+
+**Main visible pattern**
+
+- The top universities in this filtered view are: **{top_names}**.
+- The lowest-scoring universities in this filtered view are: **{low_names}**.
+- The average teaching, placement, research, and financial scores should be compared together because the dashboard is designed to show multidimensional profiles rather than a single ranking.
+
+**Suggested next visual exploration**
+
+Open the **University Profile** page for one top university and one lower-scoring university, then use **University Comparison** to compare the two profiles directly.
+
+**Important limitation**
+
+This overview is descriptive and exploratory. It does not imply causality or policy recommendations.{q}
+"""
+
+
+def local_single_interpretation(context: dict, user_question: str | None = None) -> str:
+    overall = float(context.get("overall_score") or 0)
+    teaching = float(context.get("teaching_score") or 0)
+    placement = float(context.get("placement_score") or 0)
+    research = float(context.get("research_score") or 0)
+    financial = float(context.get("financial_score") or 0)
+    national = float(context.get("national_avg_overall_score") or 0)
+    macro = float(context.get("macro_area_avg_overall_score") or 0)
+    rank = int(context.get("overall_rank_year") or 0)
+    dimensions = {"teaching": teaching, "placement": placement, "research": research, "financial": financial}
+    strongest = max(dimensions, key=dimensions.get)
+    weakest = min(dimensions, key=dimensions.get)
+    national_gap = overall - national
+    macro_gap = overall - macro
+    q = f"\n\n**User question**\n\n{user_question}\n\nThe answer should focus only on the indicators visible in the current page." if user_question else ""
+    return f"""
+**{context.get('view_type')} interpretation**
+
+{context.get('university')} in **{context.get('year')}** has a **{score_label(overall)}** overall profile with an overall score of **{overall:.1f}** and rank **{rank}/61**.
+
+**Benchmark comparison**
+
+- It is **{abs(national_gap):.1f} points {'above' if national_gap >= 0 else 'below'}** the national average.
+- It is **{abs(macro_gap):.1f} points {'above' if macro_gap >= 0 else 'below'}** the macro-area average.
+
+**Strengths**
+
+- The strongest visible dimension is **{strongest}** with a score of **{dimensions[strongest]:.1f}**.
+
+**Weaknesses / points to monitor**
+
+- The weakest visible dimension is **{weakest}** with a score of **{dimensions[weakest]:.1f}**.
+- The financial profile should be checked together with FFO per student, operating cost per student, and personnel cost share.
+
+**Suggested next visual exploration**
+
+Use the **University Comparison** page to compare this university with a similar institution from **{context.get('region')}** or **{context.get('macro_area')}**.
+
+**Important limitation**
+
+This is a dashboard-based interpretation. It does not imply causality or policy recommendations.{q}
+"""
+
+
+def local_comparison_interpretation(context: dict, user_question: str | None = None) -> str:
+    a = context["university_a"]
+    b = context["university_b"]
+    gaps = context["score_gaps_a_minus_b"]
+    dims = {
+        "overall": float(gaps["overall_gap_a_minus_b"]),
+        "teaching": float(gaps["teaching_gap_a_minus_b"]),
+        "placement": float(gaps["placement_gap_a_minus_b"]),
+        "research": float(gaps["research_gap_a_minus_b"]),
+        "financial": float(gaps["financial_gap_a_minus_b"]),
+    }
+    largest_dim = max(dims, key=lambda k: abs(dims[k]))
+    overall_gap = dims["overall"]
+    leader = a["university"] if overall_gap >= 0 else b["university"]
+    follower = b["university"] if overall_gap >= 0 else a["university"]
+    q = f"\n\n**User question**\n\n{user_question}\n\nThe answer should focus only on the two selected universities and the comparison charts." if user_question else ""
+    return f"""
+**University comparison interpretation**
+
+In **{context.get('year')}**, **{leader}** has a higher overall score than **{follower}** by **{abs(overall_gap):.1f} points**.
+
+**Largest visible gap**
+
+- The largest difference is in **{largest_dim}**, where the gap is **{abs(dims[largest_dim]):.1f} points**.
+
+**Side-by-side profile**
+
+- **{a['university']}**: overall **{float(a['overall_score']):.1f}**, rank **{int(a['overall_rank_year'])}/61**, research **{float(a['research_score']):.1f}**, financial **{float(a['financial_score']):.1f}**.
+- **{b['university']}**: overall **{float(b['overall_score']):.1f}**, rank **{int(b['overall_rank_year'])}/61**, research **{float(b['research_score']):.1f}**, financial **{float(b['financial_score']):.1f}**.
+
+**What to inspect next**
+
+Check whether the same gap is stable over 2020-2023 in the trend chart. If the gap appears only in one year, it should be interpreted cautiously.
+
+**Important limitation**
+
+This comparison is descriptive. It does not explain why one university performs better and does not imply causality.{q}
+"""
+
+
+def local_methodology_interpretation(context: dict, user_question: str | None = None) -> str:
+    q = f"\n\n**User question**\n\n{user_question}" if user_question else ""
+    return f"""
+**Data and methodology interpretation**
+
+This page documents the dataset and the dashboard logic. The dashboard uses a curated prototype dataset for Italian universities over **2020-2023**.
+
+**Important methodological point**
+
+The score fields are **dashboard-based normalized profile scores**, not DEA or SFA efficiency estimates. They are designed to support visual exploration across teaching, placement, research, and financial dimensions.
+
+**How to use this page**
+
+Use the downloadable filtered dataset for transparency and reproducibility. Use the visible AI input to check what information is passed to the assistant.
+
+**Important limitation**
+
+The dashboard supports interpretation and comparison, but it does not produce causal conclusions or autonomous policy recommendations.{q}
+"""
+
+
+def generate_local_interpretation(context: dict, user_question: str | None = None) -> str:
+    view_type = context.get("view_type")
+    if view_type == "Overview":
+        return local_overview_interpretation(context, user_question)
+    if view_type == "University Comparison":
+        return local_comparison_interpretation(context, user_question)
+    if view_type == "Data and Methodology":
+        return local_methodology_interpretation(context, user_question)
+    return local_single_interpretation(context, user_question)
+
+
+def generate_ai_interpretation(context: dict, user_question: str | None = None) -> str:
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY", None)
+    except Exception:
+        api_key = None
+
+    if OpenAI is None or not is_valid_api_key(api_key):
+        return generate_local_interpretation(context, user_question)
+
+    client = OpenAI(api_key=api_key.strip())
+    prompt = {
+        "task": f"Interpret the current dashboard page: {context.get('view_type')}.",
+        "rules": [
+            "Use only the provided dashboard context.",
+            "Analyze only the currently selected page/view_type.",
+            "Do not refer to other dashboard pages unless suggesting next exploration.",
+            "Do not invent missing values.",
+            "Do not make causal claims.",
+            "Write in concise academic English.",
+            "Return: short summary, strengths, weaknesses or gaps, benchmark/comparison interpretation, suggested next visual exploration.",
+        ],
+        "current_dashboard_context": context,
+        "user_question": user_question,
+    }
+    try:
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=json.dumps(prompt, ensure_ascii=True),
+        )
+        return response.output_text
+    except Exception:
+        return generate_local_interpretation(context, user_question)
+
+
+def score_bar_chart(score_df: pd.DataFrame) -> alt.Chart:
     return (
         alt.Chart(score_df)
         .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
         .encode(
             x=alt.X("Dimension:N", sort=None, title="Dimension"),
-            y=alt.Y("Score:Q", scale=alt.Scale(domain=[0, 100]), title="Score"),
+            y=alt.Y("Score:Q", title="Score", scale=alt.Scale(domain=[0, 100])),
             color=alt.Color("Dimension:N", legend=None),
             tooltip=["Dimension", alt.Tooltip("Score:Q", format=".1f")],
         )
@@ -408,7 +407,7 @@ def make_score_profile_chart(row: pd.Series) -> alt.Chart:
     )
 
 
-def make_benchmark_chart(row: pd.Series) -> alt.Chart:
+def benchmark_chart(row: pd.Series) -> alt.Chart:
     benchmark_df = pd.DataFrame(
         {
             "Benchmark": ["Selected university", "National average", "Macro-area average"],
@@ -424,7 +423,7 @@ def make_benchmark_chart(row: pd.Series) -> alt.Chart:
         .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
         .encode(
             x=alt.X("Benchmark:N", sort=None, title="Benchmark"),
-            y=alt.Y("Overall score:Q", scale=alt.Scale(domain=[0, 100]), title="Overall score"),
+            y=alt.Y("Overall score:Q", title="Overall score", scale=alt.Scale(domain=[0, 100])),
             color=alt.Color("Benchmark:N", legend=None),
             tooltip=["Benchmark", alt.Tooltip("Overall score:Q", format=".1f")],
         )
@@ -432,55 +431,13 @@ def make_benchmark_chart(row: pd.Series) -> alt.Chart:
     )
 
 
-def make_indicator_bar(row: pd.Series, indicators: dict[str, str]) -> alt.Chart:
-    chart_df = pd.DataFrame(
-        {
-            "Indicator": list(indicators.values()),
-            "Value": [row[col] if col in row.index else None for col in indicators.keys()],
-        }
-    ).dropna()
-    return (
-        alt.Chart(chart_df)
-        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
-        .encode(
-            x=alt.X("Value:Q", title="Value"),
-            y=alt.Y("Indicator:N", sort="-x", title=""),
-            tooltip=["Indicator", alt.Tooltip("Value:Q", format=".2f")],
-        )
-        .properties(height=280)
-    )
-
-
-def format_number(value: float, digits: int = 1) -> str:
-    if pd.isna(value):
-        return "n/a"
-    return f"{value:,.{digits}f}"
-
-
-# Load data
 df = load_data()
 
 st.title("AI-enhanced Visual Analytics Dashboard for Italian Universities")
-st.caption(
-    "Prototype dashboard for exploring teaching, placement, research, and financial profiles "
-    "of Italian universities, 2020-2023."
-)
-
-st.markdown(
-    """
-    <style>
-    .block-container { padding-top: 2.0rem; padding-bottom: 2rem; }
-    div[data-testid="stMetric"] { background-color: #fafafa; padding: 0.7rem 0.8rem; border-radius: 0.7rem; border: 1px solid #eeeeee; }
-    div[data-testid="stSidebar"] { background-color: #f5f7fb; }
-    .small-note { color: #6b7280; font-size: 0.90rem; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.caption("Interactive prototype for exploring teaching, placement, research, and financial profiles of Italian universities, 2020-2023.")
 
 with st.sidebar:
     st.header("Filters")
-
     years = sorted(df["year"].unique())
     year = st.selectbox("Year", years, index=len(years) - 1)
 
@@ -511,13 +468,22 @@ if filtered.empty:
     st.error("No universities match the selected filters. Please change the filters.")
     st.stop()
 
-university = st.sidebar.selectbox("University", sorted(filtered["university"].unique()))
-st.sidebar.caption("Tip: change filters first, then choose a university and press Analyze current view.")
+with st.sidebar:
+    university = st.selectbox("University", sorted(filtered["university"].unique()))
+    st.caption("Tip: choose the page first, then press Analyze current view.")
 
 selected = filtered[filtered["university"] == university].iloc[0]
-context = selected_context(selected)
 
 main_col, ai_col = st.columns([3.2, 1.1], gap="large")
+
+pages = [
+    "Overview",
+    "University Profile",
+    "University Comparison",
+    "Finance Explorer",
+    "Teaching and Research",
+    "Data and Methodology",
+]
 
 with main_col:
     st.subheader(f"{university} - {year}")
@@ -526,12 +492,14 @@ with main_col:
         unsafe_allow_html=True,
     )
     st.write("")
+    page = st.radio("Dashboard page", pages, horizontal=True, label_visibility="collapsed")
+    st.divider()
 
-    tab_overview, tab_profile, tab_comparison, tab_finance, tab_teaching_research, tab_data = st.tabs(
-        ["Overview", "University Profile", "University Comparison", "Finance Explorer", "Teaching and Research", "Data and Methodology"]
-    )
+    # Default active context, overwritten by page-specific contexts below.
+    active_context = selected_context(selected, page)
 
-    with tab_overview:
+    if page == "Overview":
+        active_context = make_overview_context(filtered, year, macro_area, region, size_class)
         st.markdown("### System overview")
         st.caption("This page summarizes the universities that match the current filters and shows the overall distribution of dashboard-based profile scores.")
         o1, o2, o3, o4 = st.columns(4)
@@ -546,55 +514,53 @@ with main_col:
             .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
             .encode(
                 x=alt.X("overall_score:Q", title="Overall score", scale=alt.Scale(domain=[0, 100])),
-                y=alt.Y("university:N", sort="-x", title="University"),
-                tooltip=["university", "region", "macro_area", alt.Tooltip("overall_score:Q", format=".1f")],
+                y=alt.Y("university:N", sort="-x", title=None),
+                tooltip=["university", "region", alt.Tooltip("overall_score:Q", format=".1f")],
             )
-            .properties(height=330)
+            .properties(height=360)
         )
-
-        macro_summary = (
-            filtered.groupby("macro_area", as_index=False)[
-                ["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"]
-            ]
+        macro_avg = (
+            filtered.groupby("macro_area", as_index=False)[["overall_score", "teaching_score", "research_score", "financial_score"]]
             .mean()
-            .melt(id_vars="macro_area", var_name="Score type", value_name="Average score")
+            .sort_values("overall_score", ascending=False)
         )
+        macro_long = macro_avg.melt(id_vars="macro_area", var_name="Score type", value_name="Score")
         macro_chart = (
-            alt.Chart(macro_summary)
+            alt.Chart(macro_long)
             .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
             .encode(
                 x=alt.X("macro_area:N", title="Macro-area"),
-                y=alt.Y("Average score:Q", scale=alt.Scale(domain=[0, 100])),
-                color=alt.Color("Score type:N"),
-                tooltip=["macro_area", "Score type", alt.Tooltip("Average score:Q", format=".1f")],
+                y=alt.Y("Score:Q", scale=alt.Scale(domain=[0, 100])),
+                color=alt.Color("Score type:N", title="Score type"),
+                tooltip=["macro_area", "Score type", alt.Tooltip("Score:Q", format=".1f")],
             )
-            .properties(height=330)
+            .properties(height=360)
         )
-
-        oc1, oc2 = st.columns(2)
-        with oc1:
+        c1, c2 = st.columns(2)
+        with c1:
             st.markdown("#### Top 10 universities by overall score")
             st.altair_chart(top_chart, width="stretch")
-        with oc2:
-            st.markdown("#### Average scores by macro-area")
+        with c2:
+            st.markdown("#### Average profile by macro-area")
             st.altair_chart(macro_chart, width="stretch")
 
-        hist = (
+        distribution = (
             alt.Chart(filtered)
             .mark_bar()
             .encode(
-                x=alt.X("overall_score:Q", bin=alt.Bin(maxbins=15), title="Overall score"),
+                x=alt.X("overall_score:Q", bin=alt.Bin(maxbins=18), title="Overall score"),
                 y=alt.Y("count():Q", title="Number of universities"),
-                tooltip=["count()"],
+                tooltip=[alt.Tooltip("count():Q", title="Universities")],
             )
             .properties(height=260)
         )
         st.markdown("#### Distribution of overall scores")
-        st.altair_chart(hist, width="stretch")
+        st.altair_chart(distribution, width="stretch")
 
-    with tab_profile:
+    elif page == "University Profile":
+        active_context = selected_context(selected, page)
         st.markdown("### University profile")
-        st.caption("This page compares the selected university with national and macro-area benchmarks and shows score dynamics over time.")
+        st.caption("This page focuses on one selected university and compares its overall profile with national and macro-area averages.")
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Overall score", f"{selected['overall_score']:.1f}")
         k2.metric("Rank", f"{int(selected['overall_rank_year'])}/61")
@@ -602,23 +568,17 @@ with main_col:
         k4.metric("Research", f"{selected['research_score']:.1f}")
         k5.metric("Financial", f"{selected['financial_score']:.1f}")
 
-        if "placement_data_completeness" in selected.index and selected["placement_data_completeness"] != "complete":
-            st.warning(
-                "Placement score may be based on incomplete placement components. "
-                f"Completeness flag: {selected['placement_data_completeness']}"
-            )
-
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("#### Performance profile")
-            st.altair_chart(make_score_profile_chart(selected), width="stretch")
+            st.altair_chart(score_bar_chart(make_score_profile(selected)), width="stretch")
         with c2:
             st.markdown("#### Benchmark comparison")
-            st.altair_chart(make_benchmark_chart(selected), width="stretch")
+            st.altair_chart(benchmark_chart(selected), width="stretch")
 
         trend = df[df["university"] == university].sort_values("year")
         trend_long = trend.melt(
-            id_vars=["university", "year"],
+            id_vars=["year", "university"],
             value_vars=["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"],
             var_name="Score type",
             value_name="Score",
@@ -628,128 +588,142 @@ with main_col:
             .mark_line(point=True)
             .encode(
                 x=alt.X("year:O", title="Year"),
-                y=alt.Y("Score:Q", title="Score", scale=alt.Scale(domain=[0, 100])),
-                color=alt.Color("Score type:N"),
+                y=alt.Y("Score:Q", scale=alt.Scale(domain=[0, 100])),
+                color=alt.Color("Score type:N", title="Score type"),
                 tooltip=["year", "Score type", alt.Tooltip("Score:Q", format=".1f")],
             )
-            .properties(height=300)
+            .properties(height=330)
         )
         st.markdown("#### Score dynamics over time")
         st.altair_chart(trend_chart, width="stretch")
 
-    with tab_comparison:
+    elif page == "University Comparison":
         st.markdown("### University comparison")
         st.caption("Select two universities in the same year and compare their scores, ranks, financial indicators, and time trends. The comparison is exploratory and does not imply causality.")
 
-        comparison_base = df[df["year"] == year].copy()
-        if macro_area != "All":
-            comparison_base = comparison_base[comparison_base["macro_area"] == macro_area]
-        if region != "All":
-            comparison_base = comparison_base[comparison_base["region"] == region]
-        if size_class != "All":
-            comparison_base = comparison_base[comparison_base["size_class"] == size_class]
+        universities_available = sorted(filtered["university"].unique())
+        default_a = universities_available.index(university) if university in universities_available else 0
+        default_b = 1 if len(universities_available) > 1 else 0
+        if default_b == default_a and len(universities_available) > 1:
+            default_b = 0 if default_a != 0 else 1
 
-        comparison_universities = sorted(comparison_base["university"].unique())
-        if len(comparison_universities) < 2:
-            st.warning("At least two universities are required for comparison. Please broaden the filters.")
+        ca, cb = st.columns(2)
+        with ca:
+            university_a = st.selectbox("University A", universities_available, index=default_a, key="university_a_select")
+        with cb:
+            university_b = st.selectbox("University B", universities_available, index=default_b, key="university_b_select")
+
+        if university_a == university_b:
+            st.warning("Please choose two different universities.")
+            active_context = selected_context(selected, page)
+            active_context["note"] = "The comparison page is open, but only one university has been selected."
         else:
-            default_a = comparison_universities.index(university) if university in comparison_universities else 0
-            default_b = 1 if default_a == 0 else 0
-            cc1, cc2 = st.columns(2)
-            with cc1:
-                university_a = st.selectbox("University A", comparison_universities, index=default_a)
-            with cc2:
-                university_b = st.selectbox("University B", comparison_universities, index=default_b)
+            row_a = filtered[filtered["university"] == university_a].iloc[0]
+            row_b = filtered[filtered["university"] == university_b].iloc[0]
+            active_context = comparison_context(row_a, row_b)
 
-            if university_a == university_b:
-                st.warning("Please choose two different universities.")
-            else:
-                row_a = comparison_base[comparison_base["university"] == university_a].iloc[0]
-                row_b = comparison_base[comparison_base["university"] == university_b].iloc[0]
-                comp_context = comparison_context(row_a, row_b)
+            cc1, cc2, cc3, cc4 = st.columns(4)
+            cc1.metric(f"{university_a} overall", f"{row_a['overall_score']:.1f}", f"rank {int(row_a['overall_rank_year'])}/61")
+            cc2.metric(f"{university_b} overall", f"{row_b['overall_score']:.1f}", f"rank {int(row_b['overall_rank_year'])}/61")
+            cc3.metric("Overall gap", f"{row_a['overall_score'] - row_b['overall_score']:.1f}")
+            cc4.metric("Comparison year", f"{year}")
 
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric(f"{university_a} overall", f"{row_a['overall_score']:.1f}", f"rank {int(row_a['overall_rank_year'])}/61")
-                m2.metric(f"{university_b} overall", f"{row_b['overall_score']:.1f}", f"rank {int(row_b['overall_rank_year'])}/61")
-                m3.metric("Overall gap", f"{abs(row_a['overall_score'] - row_b['overall_score']):.1f}")
-                m4.metric("Comparison year", f"{year}")
-
-                comp_col1, comp_col2 = st.columns(2)
-                with comp_col1:
-                    st.markdown("#### Side-by-side score profile")
-                    st.altair_chart(make_comparison_score_chart(row_a, row_b), width="stretch")
-                with comp_col2:
-                    st.markdown("#### Score gaps")
-                    st.altair_chart(make_comparison_gap_chart(row_a, row_b), width="stretch")
-
-                trend_pair = df[df["university"].isin([university_a, university_b])].sort_values(["university", "year"])
-                trend_pair_long = trend_pair.melt(
-                    id_vars=["university", "year"],
-                    value_vars=["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"],
-                    var_name="Score type",
-                    value_name="Score",
+            comp_scores = []
+            for label, col in [
+                ("Overall", "overall_score"),
+                ("Teaching", "teaching_score"),
+                ("Placement", "placement_score"),
+                ("Research", "research_score"),
+                ("Financial", "financial_score"),
+            ]:
+                comp_scores.append({"Dimension": label, "University": university_a, "Score": float(row_a[col])})
+                comp_scores.append({"Dimension": label, "University": university_b, "Score": float(row_b[col])})
+            comp_scores_df = pd.DataFrame(comp_scores)
+            comp_chart = (
+                alt.Chart(comp_scores_df)
+                .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+                .encode(
+                    x=alt.X("Dimension:N", sort=None, title="Dimension"),
+                    y=alt.Y("Score:Q", scale=alt.Scale(domain=[0, 100])),
+                    xOffset="University:N",
+                    color=alt.Color("University:N", title="University"),
+                    tooltip=["University", "Dimension", alt.Tooltip("Score:Q", format=".1f")],
                 )
-                selected_trend_score = st.selectbox(
-                    "Score trend to compare",
-                    ["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"],
-                    format_func=lambda x: x.replace("_", " ").title(),
-                )
-                trend_selected = trend_pair_long[trend_pair_long["Score type"] == selected_trend_score]
-                trend_pair_chart = (
-                    alt.Chart(trend_selected)
-                    .mark_line(point=True)
-                    .encode(
-                        x=alt.X("year:O", title="Year"),
-                        y=alt.Y("Score:Q", title="Score", scale=alt.Scale(domain=[0, 100])),
-                        color=alt.Color("university:N", title="University"),
-                        tooltip=["university", "year", alt.Tooltip("Score:Q", format=".1f")],
-                    )
-                    .properties(height=300)
-                )
-                st.markdown("#### Trend comparison over 2020-2023")
-                st.altair_chart(trend_pair_chart, width="stretch")
+                .properties(height=340)
+            )
 
-                comparison_table_cols = [
-                    "university",
-                    "region",
-                    "macro_area",
-                    "size_class",
-                    "overall_rank_year",
-                    "overall_score",
-                    "teaching_score",
-                    "placement_score",
-                    "research_score",
-                    "financial_score",
-                    "ffo_per_student",
-                    "operating_cost_per_student",
-                    "personnel_cost_share",
-                    "student_staff_ratio",
-                    "employment_index",
-                    "publications_per_teaching_staff",
-                ]
-                st.markdown("#### Key indicator table")
-                st.dataframe(pd.DataFrame([row_a, row_b])[comparison_table_cols], width="stretch", hide_index=True)
-
-                st.markdown("#### AI comparison interpretation")
-                comparison_question = st.text_area(
-                    "Optional question for the comparison",
-                    placeholder="Example: Which university has a more balanced profile and why?",
-                    height=90,
-                    key="comparison_question",
+            gap_data = []
+            for label, col in [
+                ("Overall", "overall_score"),
+                ("Teaching", "teaching_score"),
+                ("Placement", "placement_score"),
+                ("Research", "research_score"),
+                ("Financial", "financial_score"),
+            ]:
+                gap = float(row_a[col] - row_b[col])
+                gap_data.append(
+                    {
+                        "Dimension": label,
+                        "Gap": gap,
+                        "Direction": f"{university_a} higher" if gap >= 0 else f"{university_b} higher",
+                    }
                 )
-                if "comparison_ai_answer" not in st.session_state:
-                    st.session_state.comparison_ai_answer = ""
-                if st.button("Analyze comparison", type="primary"):
-                    with st.spinner("Generating comparison interpretation..."):
-                        st.session_state.comparison_ai_answer = generate_ai_comparison_interpretation(
-                            comp_context, comparison_question or None
-                        )
-                if st.session_state.comparison_ai_answer:
-                    st.markdown(st.session_state.comparison_ai_answer)
-                with st.expander("Selected comparison AI input"):
-                    st.json(comp_context)
+            gap_df = pd.DataFrame(gap_data)
+            gap_chart = (
+                alt.Chart(gap_df)
+                .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+                .encode(
+                    x=alt.X("Gap:Q", title=f"Score gap: {university_a} minus {university_b}"),
+                    y=alt.Y("Dimension:N", sort=None, title="Dimension"),
+                    color=alt.Color("Direction:N", title="Direction"),
+                    tooltip=["Dimension", alt.Tooltip("Gap:Q", format=".1f"), "Direction"],
+                )
+                .properties(height=340)
+            )
+            gc1, gc2 = st.columns(2)
+            with gc1:
+                st.markdown("#### Side-by-side score profile")
+                st.altair_chart(comp_chart, width="stretch")
+            with gc2:
+                st.markdown("#### Score gaps")
+                st.altair_chart(gap_chart, width="stretch")
 
-    with tab_finance:
+            trends = df[df["university"].isin([university_a, university_b])].sort_values(["university", "year"])
+            trend_comp = (
+                alt.Chart(trends)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("year:O", title="Year"),
+                    y=alt.Y("overall_score:Q", title="Overall score", scale=alt.Scale(domain=[0, 100])),
+                    color=alt.Color("university:N", title="University"),
+                    tooltip=["university", "year", alt.Tooltip("overall_score:Q", format=".1f")],
+                )
+                .properties(height=300)
+            )
+            st.markdown("#### Overall score trend comparison, 2020-2023")
+            st.altair_chart(trend_comp, width="stretch")
+
+            comparison_table_cols = [
+                "university",
+                "year",
+                "region",
+                "macro_area",
+                "size_class",
+                "overall_score",
+                "overall_rank_year",
+                "teaching_score",
+                "placement_score",
+                "research_score",
+                "financial_score",
+                "ffo_per_student",
+                "operating_cost_per_student",
+                "personnel_cost_share",
+            ]
+            st.markdown("#### Key indicator table")
+            st.dataframe(pd.DataFrame([row_a, row_b])[comparison_table_cols], width="stretch", hide_index=True)
+
+    elif page == "Finance Explorer":
+        active_context = selected_context(selected, page)
         st.markdown("### Finance explorer")
         st.caption("Use this page to explore observed relationships between financial indicators and profile scores. The scatterplot is exploratory and does not imply causality.")
 
@@ -780,12 +754,15 @@ with main_col:
             finance_label = st.selectbox("Financial indicator for x-axis", list(finance_options.keys()))
         with fc2:
             score_label_choice = st.selectbox("Score for y-axis", list(score_options.keys()))
-
         x_col = finance_options[finance_label]
         y_col = score_options[score_label_choice]
+        active_context["finance_x_axis"] = finance_label
+        active_context["score_y_axis"] = score_label_choice
+        active_context["selected_x_value"] = clean_value(selected.get(x_col))
+        active_context["selected_y_value"] = clean_value(selected.get(y_col))
+
         scatter_data = filtered.copy()
         scatter_data["selected_flag"] = scatter_data["university"].eq(university)
-
         base_scatter = (
             alt.Chart(scatter_data)
             .mark_circle(size=85, opacity=0.65)
@@ -807,20 +784,12 @@ with main_col:
         selected_point = (
             alt.Chart(scatter_data[scatter_data["selected_flag"]])
             .mark_circle(size=260, fillOpacity=0, stroke="black", strokeWidth=3)
-            .encode(
-                x=alt.X(f"{x_col}:Q"),
-                y=alt.Y(f"{y_col}:Q"),
-                tooltip=["university"],
-            )
+            .encode(x=alt.X(f"{x_col}:Q"), y=alt.Y(f"{y_col}:Q"), tooltip=["university"])
         )
         selected_label = (
             alt.Chart(scatter_data[scatter_data["selected_flag"]])
             .mark_text(align="left", dx=10, dy=-10, fontSize=12, fontWeight="bold")
-            .encode(
-                x=alt.X(f"{x_col}:Q"),
-                y=alt.Y(f"{y_col}:Q"),
-                text="university:N",
-            )
+            .encode(x=alt.X(f"{x_col}:Q"), y=alt.Y(f"{y_col}:Q"), text="university:N")
         )
         st.markdown("#### Financial indicator vs selected score")
         st.altair_chart((base_scatter + selected_point + selected_label).properties(height=380), width="stretch")
@@ -835,10 +804,10 @@ with main_col:
         st.markdown("#### Selected university financial structure")
         st.altair_chart(make_indicator_bar(selected, finance_indicators), width="stretch")
 
-    with tab_teaching_research:
+    elif page == "Teaching and Research":
+        active_context = selected_context(selected, page)
         st.markdown("### Teaching and research profile")
         st.caption("This page separates teaching, placement, and research indicators so that the profile is not reduced to a single ranking.")
-
         teaching_indicators = {
             "second_year_retention_pct": "Second-year retention (%)",
             "inactive_students_reversed_score": "Inactive students reversed score",
@@ -853,7 +822,6 @@ with main_col:
             "highly_cited_researchers": "Highly cited researchers",
             "nature_science_articles": "Nature and Science articles",
         }
-
         tr1, tr2 = st.columns(2)
         with tr1:
             st.markdown("#### Teaching and placement indicators")
@@ -882,15 +850,25 @@ with main_col:
         st.markdown("#### Teaching vs research positioning")
         st.altair_chart((teaching_research_scatter + selected_tr).properties(height=360), width="stretch")
 
-    with tab_data:
+    elif page == "Data and Methodology":
+        active_context = {
+            "view_type": "Data and Methodology",
+            "year": int(year),
+            "dataset_scope": "61 Italian universities, 2020-2023",
+            "score_definition": "Dashboard-based normalized profile scores, not DEA or SFA efficiency scores.",
+            "current_filter_count": int(filtered["university"].nunique()),
+            "macro_area_filter": macro_area,
+            "region_filter": region,
+            "size_class_filter": size_class,
+        }
         st.markdown("### Data and methodology")
         st.markdown(
             "The dashboard uses a curated prototype dataset covering 61 Italian universities over 2020-2023. "
             "The score fields are dashboard-based normalized profile scores, not DEA or SFA efficiency scores. "
             "They are intended for visual exploration and comparison."
         )
-        st.markdown("#### Selected AI input")
-        st.json(context)
+        st.markdown("#### Current page AI input")
+        st.json(active_context)
         st.markdown("#### Current filtered dataset")
         csv_data = filtered.sort_values("overall_score", ascending=False).to_csv(index=False).encode("utf-8")
         st.download_button(
@@ -903,33 +881,53 @@ with main_col:
 
 with ai_col:
     st.subheader("AI Analysis Companion")
-    st.caption("Interprets only the selected dashboard context. The output supports exploration, not causal conclusions.")
+    st.caption("The assistant analyzes only the currently selected dashboard page.")
 
     question = st.text_area(
         "Optional question",
-        placeholder="Example: Why is the financial score lower than the research score?",
+        placeholder="Example: What is the main gap on this page?",
         height=110,
     )
 
     if "ai_answer" not in st.session_state:
         st.session_state.ai_answer = ""
+    if "last_ai_signature" not in st.session_state:
+        st.session_state.last_ai_signature = ""
 
-    st.markdown(
-        f"**Current context:** {university}, {year}<br>Overall score: **{selected['overall_score']:.1f}** | Rank: **{int(selected['overall_rank_year'])}/61**",
-        unsafe_allow_html=True,
-    )
+    signature = json.dumps(active_context, ensure_ascii=True, sort_keys=True, default=str)
+    if signature != st.session_state.last_ai_signature:
+        st.session_state.ai_answer = ""
+        st.session_state.last_ai_signature = signature
 
-    if st.button("Analyze current view", type="primary"):
-        with st.spinner("Generating interpretation..."):
-            st.session_state.ai_answer = generate_ai_interpretation(context, question or None)
+    view_type = active_context.get("view_type", page)
+    if view_type == "University Comparison" and "university_a" in active_context and "university_b" in active_context:
+        st.markdown(
+            f"**Current page:** {view_type}<br>**Context:** {active_context['university_a']['university']} vs {active_context['university_b']['university']}, {active_context.get('year')}",
+            unsafe_allow_html=True,
+        )
+    elif view_type == "Overview":
+        st.markdown(
+            f"**Current page:** {view_type}<br>**Context:** {active_context.get('number_of_universities')} universities, {active_context.get('year')}",
+            unsafe_allow_html=True,
+        )
+    elif view_type == "Data and Methodology":
+        st.markdown(f"**Current page:** {view_type}<br>**Context:** dataset and score construction", unsafe_allow_html=True)
+    else:
+        st.markdown(
+            f"**Current page:** {view_type}<br>**Context:** {active_context.get('university')}, {active_context.get('year')}",
+            unsafe_allow_html=True,
+        )
+
+    if st.button("Analyze current page", type="primary"):
+        with st.spinner("Generating page-specific interpretation..."):
+            st.session_state.ai_answer = generate_ai_interpretation(active_context, question or None)
 
     if st.session_state.ai_answer:
         st.markdown(st.session_state.ai_answer)
 
-    with st.expander("Selected AI input"):
-        st.json(context)
+    with st.expander("Current AI input"):
+        st.json(active_context)
 
     st.info(
-        "The AI assistant supports interpretation only. It does not provide causal conclusions "
-        "or autonomous policy recommendations."
+        "The AI assistant supports interpretation only. It analyzes the current page context and does not provide causal conclusions or autonomous policy recommendations."
     )
