@@ -223,6 +223,107 @@ def make_indicator_bar(row: pd.Series, indicators: dict[str, str]) -> alt.Chart:
     )
 
 
+def numeric_series(data: pd.DataFrame, column: str) -> pd.Series:
+    if column not in data.columns:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(data[column], errors="coerce").dropna()
+
+
+def percentile_position(data: pd.DataFrame, column: str, value: Any) -> float | None:
+    series = numeric_series(data, column)
+    if series.empty or value is None or pd.isna(value):
+        return None
+    value = float(value)
+    return float((series <= value).mean() * 100)
+
+
+def position_label(percentile: float | None) -> str:
+    if percentile is None:
+        return "not available"
+    if percentile >= 85:
+        return "upper tail"
+    if percentile >= 65:
+        return "above the central range"
+    if percentile >= 35:
+        return "central range"
+    if percentile >= 15:
+        return "below the central range"
+    return "lower tail"
+
+
+def median_gap_label(value: Any, median: Any) -> str:
+    if value is None or median is None or pd.isna(value) or pd.isna(median):
+        return "not available"
+    gap = float(value) - float(median)
+    if abs(gap) < 1e-9:
+        return "close to the median"
+    return "above the median" if gap > 0 else "below the median"
+
+
+def cluster_label(x_percentile: float | None, y_percentile: float | None) -> str:
+    if x_percentile is None or y_percentile is None:
+        return "not available"
+    if 25 <= x_percentile <= 75 and 25 <= y_percentile <= 75:
+        return "inside the main cluster"
+    if x_percentile >= 90 or x_percentile <= 10 or y_percentile >= 90 or y_percentile <= 10:
+        return "near the edge of the distribution"
+    return "outside the central band but not an extreme outlier"
+
+
+def add_profile_position_context(context: dict, filtered_data: pd.DataFrame, row: pd.Series) -> dict:
+    for col in ["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"]:
+        if col in filtered_data.columns:
+            context[f"{col}_median_current_filter"] = clean_value(numeric_series(filtered_data, col).median())
+            context[f"{col}_percentile_current_filter"] = clean_value(percentile_position(filtered_data, col, row.get(col)))
+    return context
+
+
+def add_finance_position_context(context: dict, filtered_data: pd.DataFrame, x_col: str, y_col: str, row: pd.Series) -> dict:
+    x_series = numeric_series(filtered_data, x_col)
+    y_series = numeric_series(filtered_data, y_col)
+    x_val = row.get(x_col)
+    y_val = row.get(y_col)
+    x_pct = percentile_position(filtered_data, x_col, x_val)
+    y_pct = percentile_position(filtered_data, y_col, y_val)
+    context.update(
+        {
+            "x_axis_median_current_filter": clean_value(x_series.median()) if not x_series.empty else None,
+            "y_axis_median_current_filter": clean_value(y_series.median()) if not y_series.empty else None,
+            "x_axis_percentile_current_filter": clean_value(x_pct),
+            "y_axis_percentile_current_filter": clean_value(y_pct),
+            "x_axis_position_label": position_label(x_pct),
+            "y_axis_position_label": position_label(y_pct),
+            "scatter_cluster_position": cluster_label(x_pct, y_pct),
+            "x_axis_median_gap_label": median_gap_label(x_val, x_series.median()) if not x_series.empty else "not available",
+            "y_axis_median_gap_label": median_gap_label(y_val, y_series.median()) if not y_series.empty else "not available",
+        }
+    )
+    return context
+
+
+def add_teaching_research_position_context(context: dict, filtered_data: pd.DataFrame, row: pd.Series) -> dict:
+    pairs = {
+        "teaching_score": row.get("teaching_score"),
+        "placement_score": row.get("placement_score"),
+        "research_score": row.get("research_score"),
+        "second_year_retention_pct": row.get("second_year_retention_pct"),
+        "graduation_within_standard_pct": row.get("graduation_within_standard_pct"),
+        "employment_index": row.get("employment_index"),
+        "publications_per_teaching_staff": row.get("publications_per_teaching_staff"),
+        "citations_per_publication": row.get("citations_per_publication"),
+        "h_index": row.get("h_index"),
+    }
+    for col, value in pairs.items():
+        if col in filtered_data.columns:
+            series = numeric_series(filtered_data, col)
+            context[f"{col}_median_current_filter"] = clean_value(series.median()) if not series.empty else None
+            context[f"{col}_percentile_current_filter"] = clean_value(percentile_position(filtered_data, col, value))
+    teaching_pct = context.get("teaching_score_percentile_current_filter")
+    research_pct = context.get("research_score_percentile_current_filter")
+    context["teaching_research_position"] = cluster_label(teaching_pct, research_pct)
+    return context
+
+
 
 def gap_direction(gap: float, threshold: float = 5.0) -> str:
     if gap >= threshold:
@@ -343,6 +444,13 @@ def local_finance_interpretation(context: dict, user_question: str | None = None
     y_label = context.get("score_y_axis", "selected score")
     x_value = context.get("selected_x_value")
     y_value = context.get("selected_y_value")
+    x_median = context.get("x_axis_median_current_filter")
+    y_median = context.get("y_axis_median_current_filter")
+    x_pct = context.get("x_axis_percentile_current_filter")
+    y_pct = context.get("y_axis_percentile_current_filter")
+    x_position = context.get("x_axis_position_label", "not available")
+    y_position = context.get("y_axis_position_label", "not available")
+    cluster_position = context.get("scatter_cluster_position", "not available")
     ffo = context.get("ffo_per_student")
     op_cost = context.get("operating_cost_per_student")
     personnel = context.get("personnel_cost_share")
@@ -356,35 +464,50 @@ def local_finance_interpretation(context: dict, user_question: str | None = None
         finance_reading = "the financial dimension is weaker than the overall profile"
     else:
         finance_reading = "the financial dimension is broadly aligned with the overall profile"
+
+    if cluster_position == "inside the main cluster":
+        cluster_reading = (
+            f"The selected point is inside the main cluster: it is not an outlier on this page. "
+            f"The interpretation should therefore focus on moderate differences in funding, costs, and revenue structure rather than on an exceptional financial pattern."
+        )
+    elif cluster_position == "near the edge of the distribution":
+        cluster_reading = (
+            f"The selected point is close to the edge of the distribution. This makes the university more distinctive in the current filtered group, "
+            f"so the selected financial indicator should be inspected carefully before generalizing the profile."
+        )
+    else:
+        cluster_reading = (
+            f"The selected point is outside the central band but not an extreme outlier. This suggests a visible but not exceptional financial-performance position."
+        )
+
     q = f"\n\n**User question**\n\n{user_question}\n\nThe answer should focus on the Finance Explorer page only." if user_question else ""
     return f"""
 **Finance Explorer analysis**
 
 This page reads the financial position of **{uni}** in **{year}** through the selected scatterplot: **{x_label}** on the x-axis and **{y_label}** on the y-axis.
 
-**What the selected point means**
+**Position in the scatterplot**
 
-The selected university has **{format_number(x_value, 2)}** on the financial x-axis and **{format_number(y_value, 1)}** on the selected score y-axis. Its financial score is **{financial:.1f}**, while its overall score is **{overall:.1f}**. Therefore, **{finance_reading}**.
+The selected university has **{format_number(x_value, 2)}** on the x-axis and **{format_number(y_value, 1)}** on the y-axis. Within the current filtered group, this places it in the **{x_position}** for **{x_label}** and in the **{y_position}** for **{y_label}**. The median values in the same filtered group are **{format_number(x_median, 2)}** for the x-axis and **{format_number(y_median, 1)}** for the y-axis.
+
+**What this means analytically**
+
+{cluster_reading} Its financial score is **{financial:.1f}**, while its overall score is **{overall:.1f}**; therefore, **{finance_reading}**. This is more informative than reading the financial score alone, because it shows whether finance is pulling the university's profile up, down, or moving together with the general performance profile.
 
 **Financial structure reading**
 
-The financial profile should be interpreted as a combination of funding intensity, cost pressure, and revenue structure. FFO per student is **{format_number(ffo, 0)}**, operating cost per student is **{format_number(op_cost, 0)}**, and personnel cost share is **{format_number(personnel, 2)}**. A high operating cost or personnel share does not automatically mean poor performance, but it may indicate that the financial score should be read together with university size and staffing structure.
+The financial profile combines funding intensity, cost pressure, and revenue structure. FFO per student is **{format_number(ffo, 0)}**, operating cost per student is **{format_number(op_cost, 0)}**, and personnel cost share is **{format_number(personnel, 2)}**. Public revenue share is **{format_number(public_share, 2)}**, while student contribution share is **{format_number(student_share, 2)}**. This suggests whether the financial profile is more dependent on public funding, student contributions, or internal cost structure.
 
-Public revenue share is **{format_number(public_share, 2)}**, while student contribution share is **{format_number(student_share, 2)}**. This helps distinguish universities that rely more on public funding from those with a higher student contribution component. Performance quota share is **{format_number(perf_share, 2)}**, which can be used as an additional signal of how much performance-based funding appears in the financial profile.
-
-**Analytical interpretation**
-
-If the selected point is far from the main cluster in the scatterplot, the university may have a distinctive funding-cost configuration. If it lies inside the cluster, the financial profile is less exceptional and should be interpreted through smaller differences in cost and revenue composition rather than through an outlier story.
+Performance quota share is **{format_number(perf_share, 2)}**. This should be read as an additional descriptive signal, not as proof that funding caused the observed score.
 
 **Next visual step**
 
-Change the x-axis from **{x_label}** to another financial indicator. If the university remains in a similar relative position across financial indicators, the pattern is more robust; if it moves substantially, the interpretation depends on the chosen financial variable.
+Change the x-axis from **{x_label}** to another financial indicator. If the university remains in the same relative position across several financial indicators, the interpretation is more robust; if it moves substantially, the financial reading depends strongly on the chosen indicator.
 
 **Limit**
 
 This page shows association and positioning only. It does not estimate the causal impact of funding or costs on performance.{q}
 """
-
 
 def local_teaching_research_interpretation(context: dict, user_question: str | None = None) -> str:
     uni = context.get("university")
@@ -403,32 +526,49 @@ def local_teaching_research_interpretation(context: dict, user_question: str | N
     ns = context.get("nature_science_articles")
     tr_gap = research - teaching
     rp_gap = research - placement
+    teaching_pct = context.get("teaching_score_percentile_current_filter")
+    research_pct = context.get("research_score_percentile_current_filter")
+    placement_pct = context.get("placement_score_percentile_current_filter")
+    tr_position = context.get("teaching_research_position", "not available")
+
     if tr_gap >= 10:
         orientation = "research-oriented"
         orientation_text = "research performance is visibly stronger than the teaching dimension"
     elif tr_gap <= -10:
         orientation = "teaching-oriented"
-        orientation_text = "teaching indicators are visibly stronger than the research dimension"
+        orientation_text = "teaching is visibly stronger than research"
     else:
         orientation = "balanced between teaching and research"
-        orientation_text = "teaching and research are relatively close, so neither side dominates the profile"
+        orientation_text = "teaching and research are relatively close"
+
+    if tr_position == "inside the main cluster":
+        position_text = "The university sits inside the main teaching-research cluster, so the profile is not an extreme outlier among the currently filtered institutions."
+    elif tr_position == "near the edge of the distribution":
+        position_text = "The university is near the edge of the teaching-research distribution, so its academic profile is relatively distinctive in the current filtered group."
+    else:
+        position_text = "The university is outside the central band but not an extreme case, indicating a visible specialization pattern rather than a fully typical profile."
+
     q = f"\n\n**User question**\n\n{user_question}\n\nThe answer should focus on the Teaching and Research page indicators." if user_question else ""
     return f"""
 **Teaching and Research analysis**
 
-For **{uni}** in **{year}**, the dashboard separates the academic profile into teaching, placement, and research. The visible profile is **{orientation}** because **{orientation_text}**.
+**{uni}** in **{year}** shows a **{orientation}** academic profile. Its teaching score is **{teaching:.1f}**, placement score is **{placement:.1f}**, and research score is **{research:.1f}**. The gap between research and teaching is **{tr_gap:.1f} points**, so **{orientation_text}**.
 
-**How to read the teaching side**
+**Position relative to the current group**
 
-Teaching score is **{teaching:.1f}** and placement score is **{placement:.1f}**. Retention is **{format_number(retention, 1)}**, inactive students reversed score is **{format_number(inactive, 1)}**, graduation within standard duration is **{format_number(grad_std, 1)}**, and employment index is **{format_number(employment, 1)}**. Together, these indicators describe the student lifecycle: continuation, regular progression, completion, and labor-market outcome.
+Within the current filtered group, the university is around the **{format_number(teaching_pct, 0)}th percentile** for teaching and the **{format_number(research_pct, 0)}th percentile** for research. {position_text} This is important because the page is not only showing the selected university's indicators; it is also showing whether its teaching-research combination is typical or distinctive compared with similar filtered universities.
 
-**How to read the research side**
+**Student lifecycle interpretation**
 
-Research score is **{research:.1f}**. Publications per teaching staff are **{format_number(pub_staff, 2)}**, citations per publication are **{format_number(cites_pub, 2)}**, H-index is **{format_number(h_index, 1)}**, highly cited researchers are **{format_number(hcr, 0)}**, and Nature/Science articles are **{format_number(ns, 0)}**. These indicators do not all measure the same thing: some reflect volume, others impact or excellence.
+The student-side profile should be read through retention, graduation, and employment together. Second-year retention is **{format_number(retention, 1)}**, graduation within standard duration is **{format_number(grad_std, 1)}**, and employment index is **{format_number(employment, 1)}**. The inactive-students reversed score is **{format_number(inactive, 1)}**, where a higher value is more favorable. If placement is lower than teaching, the dashboard suggests that the student pathway may look stronger during study progression than after graduation.
 
-**Analytical interpretation**
+**Research intensity interpretation**
 
-The gap between research and teaching is **{tr_gap:.1f} points**, and the gap between research and placement is **{rp_gap:.1f} points**. If research is much higher than teaching or placement, the university looks more research-intensive than student-outcome-oriented in this dashboard view. If teaching or placement is close to research, the profile is more balanced and should not be reduced to a research-only interpretation.
+The research side is supported by publications per teaching staff (**{format_number(pub_staff, 2)}**), citations per publication (**{format_number(cites_pub, 2)}**), H-index (**{format_number(h_index, 1)}**), highly cited researchers (**{format_number(hcr, 1)}**), and Nature/Science articles (**{format_number(ns, 1)}**). A high research score should therefore be interpreted as a composite research-intensity signal rather than as a single publication count.
+
+**Main analytical reading**
+
+The page suggests that the profile should be interpreted through the balance between student outcomes and research intensity. If research is much higher than teaching or placement, the university appears more research-intensive than student-outcome-oriented in this dashboard view. If teaching and placement are close to research, the profile is more balanced and should not be reduced to a research-only interpretation.
 
 **Next visual step**
 
@@ -438,7 +578,6 @@ Use the Teaching vs Research positioning chart to find universities with a simil
 
 This page identifies academic profile patterns. It does not explain why research, teaching, or placement indicators differ.{q}
 """
-
 
 def local_single_interpretation(context: dict, user_question: str | None = None) -> str:
     return local_profile_interpretation(context, user_question)
@@ -554,6 +693,7 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
             "Return a page-specific interpretation: do not use a generic university profile unless the current page is University Profile.",
             "For Finance Explorer, focus on financial indicators and scatterplot axes. For Teaching and Research, focus on teaching/research indicators. For Overview, focus on filtered system-level patterns. For University Comparison, focus on the two selected universities.",
             "Write analysis, not a list of visible numbers. Use a few key numbers only when they support an interpretation.",
+            "Use computed percentiles, medians, gap labels, and cluster-position fields whenever they are available.",
             "Explain what the pattern means for the current page: profile shape, trade-offs, benchmark position, specialization, outlier behavior, or balance between dimensions.",
             "Use phrases such as: this suggests, this indicates, this points to, this should be read as, but do not state causality.",
             "Return: analytical summary, interpretation of the main pattern, strengths/trade-offs, what to inspect next, and limitation.",
@@ -737,6 +877,7 @@ with main_col:
 
     elif page == "University Profile":
         active_context = selected_context(selected, page)
+        active_context = add_profile_position_context(active_context, filtered, selected)
         st.markdown("### University profile")
         st.caption("This page focuses on one selected university and compares its overall profile with national and macro-area averages.")
         k1, k2, k3, k4, k5 = st.columns(5)
@@ -938,6 +1079,7 @@ with main_col:
         active_context["score_y_axis"] = score_label_choice
         active_context["selected_x_value"] = clean_value(selected.get(x_col))
         active_context["selected_y_value"] = clean_value(selected.get(y_col))
+        active_context = add_finance_position_context(active_context, filtered, x_col, y_col, selected)
 
         scatter_data = filtered.copy()
         scatter_data["selected_flag"] = scatter_data["university"].eq(university)
@@ -984,6 +1126,7 @@ with main_col:
 
     elif page == "Teaching and Research":
         active_context = selected_context(selected, page)
+        active_context = add_teaching_research_position_context(active_context, filtered, selected)
         st.markdown("### Teaching and research profile")
         st.caption("This page separates teaching, placement, and research indicators so that the profile is not reduced to a single ranking.")
         teaching_indicators = {
