@@ -68,12 +68,13 @@ def selected_context(row: pd.Series) -> dict:
 
 
 def generate_ai_interpretation(context: dict, user_question: str | None = None) -> str:
-    api_key = st.secrets.get("OPENAI_API_KEY", None)
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY", None)
+    except Exception:
+        api_key = None
+
     if OpenAI is None or not api_key:
-        return (
-            "AI assistant is ready, but no API key is configured yet. "
-            "For now, use the selected context below as the input that will be sent to the AI model."
-        )
+        return generate_local_interpretation(context, user_question)
 
     client = OpenAI(api_key=api_key)
     prompt = {
@@ -93,6 +94,77 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
         input=json.dumps(prompt, ensure_ascii=False),
     )
     return response.output_text
+
+
+def score_label(value: float) -> str:
+    if value >= 70:
+        return "high"
+    if value >= 55:
+        return "moderate"
+    return "low"
+
+
+def generate_local_interpretation(context: dict, user_question: str | None = None) -> str:
+    """Fallback interpretation so the button works even before an API key is added."""
+    overall = float(context["overall_score"])
+    teaching = float(context["teaching_score"])
+    placement = float(context["placement_score"])
+    research = float(context["research_score"])
+    financial = float(context["financial_score"])
+    national = float(context["national_avg_overall_score"])
+    macro = float(context["macro_area_avg_overall_score"])
+    rank = int(context["overall_rank_year"])
+
+    dimensions = {
+        "teaching": teaching,
+        "placement": placement,
+        "research": research,
+        "financial": financial,
+    }
+    strongest = max(dimensions, key=dimensions.get)
+    weakest = min(dimensions, key=dimensions.get)
+    national_gap = overall - national
+    macro_gap = overall - macro
+
+    benchmark_sentence = (
+        f"The overall score is {abs(national_gap):.1f} points "
+        f"{'above' if national_gap >= 0 else 'below'} the national average and "
+        f"{abs(macro_gap):.1f} points {'above' if macro_gap >= 0 else 'below'} the macro-area average."
+    )
+
+    question_note = ""
+    if user_question:
+        question_note = (
+            f"\n\n**User question:** {user_question}\n\n"
+            "Based on the selected indicators, the answer should focus on the score profile and benchmarks only. "
+            "This dashboard does not provide causal evidence."
+        )
+
+    return f"""
+**Short summary**
+
+{context['university']} in {context['year']} has a {score_label(overall)} overall profile with an overall score of **{overall:.1f}** and rank **{rank}/61**.
+{benchmark_sentence}
+
+**Strengths**
+
+- The strongest dimension is **{strongest}** with a score of **{dimensions[strongest]:.1f}**.
+- Research and teaching should be interpreted together with the university size class: **{context['size_class']}**.
+
+**Weaknesses / points to monitor**
+
+- The weakest dimension is **{weakest}** with a score of **{dimensions[weakest]:.1f}**.
+- The financial profile should be checked together with FFO per student, operating cost per student, and personnel cost share.
+
+**Suggested next visual exploration**
+
+Compare this university with other institutions in **{context['region']}** and **{context['macro_area']}**, then inspect whether the same pattern appears across 2020-2023.
+
+**Important limitation**
+
+This is a dashboard-based interpretation. It does not imply causality or policy recommendations.
+{question_note}
+"""
 
 
 df = load_data()
@@ -239,10 +311,15 @@ with ai_col:
         height=100,
     )
 
+    if "ai_answer" not in st.session_state:
+        st.session_state.ai_answer = ""
+
     if st.button("Analyze current view", type="primary"):
         with st.spinner("Generating interpretation..."):
-            answer = generate_ai_interpretation(context, question or None)
-        st.markdown(answer)
+            st.session_state.ai_answer = generate_ai_interpretation(context, question or None)
+
+    if st.session_state.ai_answer:
+        st.markdown(st.session_state.ai_answer)
 
     with st.expander("Selected AI input"):
         st.json(context)
