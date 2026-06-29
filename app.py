@@ -132,9 +132,7 @@ def generate_local_interpretation(
             "benchmarks, and visual patterns. The dashboard does not provide causal evidence."
         )
 
-    tech = ""
-    if technical_note:
-        tech = f"\n\n**Technical note**\n\n{technical_note}"
+    tech = ""  # Technical notes are kept out of the presentation view.
 
     return f"""
 **Short summary**
@@ -157,7 +155,7 @@ Compare this university with other institutions in **{context.get('region')}** a
 
 **Important limitation**
 
-This is a dashboard-based interpretation. It does not imply causality or policy recommendations.{question_note}{tech}
+This is a dashboard-based interpretation. It does not imply causality or policy recommendations.{question_note}
 """
 
 
@@ -292,6 +290,18 @@ st.caption(
     "of Italian universities, 2020-2023."
 )
 
+st.markdown(
+    """
+    <style>
+    .block-container { padding-top: 2.0rem; padding-bottom: 2rem; }
+    div[data-testid="stMetric"] { background-color: #fafafa; padding: 0.7rem 0.8rem; border-radius: 0.7rem; border: 1px solid #eeeeee; }
+    div[data-testid="stSidebar"] { background-color: #f5f7fb; }
+    .small-note { color: #6b7280; font-size: 0.90rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 with st.sidebar:
     st.header("Filters")
 
@@ -326,6 +336,8 @@ if filtered.empty:
     st.stop()
 
 university = st.sidebar.selectbox("University", sorted(filtered["university"].unique()))
+st.sidebar.caption("Tip: change filters first, then choose a university and press Analyze current view.")
+
 selected = filtered[filtered["university"] == university].iloc[0]
 context = selected_context(selected)
 
@@ -333,6 +345,11 @@ main_col, ai_col = st.columns([3.2, 1.1], gap="large")
 
 with main_col:
     st.subheader(f"{university} - {year}")
+    st.markdown(
+        f"<span class='small-note'>Region: <b>{selected['region']}</b> | Macro-area: <b>{selected['macro_area']}</b> | Size class: <b>{selected['size_class']}</b></span>",
+        unsafe_allow_html=True,
+    )
+    st.write("")
 
     tab_overview, tab_profile, tab_finance, tab_teaching_research, tab_data = st.tabs(
         ["Overview", "University Profile", "Finance Explorer", "Teaching and Research", "Data and Methodology"]
@@ -340,6 +357,7 @@ with main_col:
 
     with tab_overview:
         st.markdown("### System overview")
+        st.caption("This page summarizes the universities that match the current filters and shows the overall distribution of dashboard-based profile scores.")
         o1, o2, o3, o4 = st.columns(4)
         o1.metric("Universities shown", f"{filtered['university'].nunique()}")
         o2.metric("Average overall", f"{filtered['overall_score'].mean():.1f}")
@@ -400,6 +418,7 @@ with main_col:
 
     with tab_profile:
         st.markdown("### University profile")
+        st.caption("This page compares the selected university with national and macro-area benchmarks and shows score dynamics over time.")
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Overall score", f"{selected['overall_score']:.1f}")
         k2.metric("Rank", f"{int(selected['overall_rank_year'])}/61")
@@ -444,6 +463,7 @@ with main_col:
 
     with tab_finance:
         st.markdown("### Finance explorer")
+        st.caption("Use this page to explore observed relationships between financial indicators and profile scores. The scatterplot is exploratory and does not imply causality.")
 
         f1, f2, f3, f4 = st.columns(4)
         f1.metric("FFO per student", format_number(selected.get("ffo_per_student"), 0))
@@ -505,8 +525,17 @@ with main_col:
                 tooltip=["university"],
             )
         )
+        selected_label = (
+            alt.Chart(scatter_data[scatter_data["selected_flag"]])
+            .mark_text(align="left", dx=10, dy=-10, fontSize=12, fontWeight="bold")
+            .encode(
+                x=alt.X(f"{x_col}:Q"),
+                y=alt.Y(f"{y_col}:Q"),
+                text="university:N",
+            )
+        )
         st.markdown("#### Financial indicator vs selected score")
-        st.altair_chart((base_scatter + selected_point).properties(height=380), width="stretch")
+        st.altair_chart((base_scatter + selected_point + selected_label).properties(height=380), width="stretch")
 
         finance_indicators = {
             "personnel_cost_share": "Personnel cost share",
@@ -520,6 +549,7 @@ with main_col:
 
     with tab_teaching_research:
         st.markdown("### Teaching and research profile")
+        st.caption("This page separates teaching, placement, and research indicators so that the profile is not reduced to a single ranking.")
 
         teaching_indicators = {
             "second_year_retention_pct": "Second-year retention (%)",
@@ -574,11 +604,18 @@ with main_col:
         st.markdown("#### Selected AI input")
         st.json(context)
         st.markdown("#### Current filtered dataset")
+        csv_data = filtered.sort_values("overall_score", ascending=False).to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download current filtered dataset as CSV",
+            data=csv_data,
+            file_name=f"filtered_university_dashboard_{year}.csv",
+            mime="text/csv",
+        )
         st.dataframe(filtered.sort_values("overall_score", ascending=False), width="stretch", hide_index=True)
 
 with ai_col:
     st.subheader("AI Analysis Companion")
-    st.caption("Interprets only the selected dashboard context.")
+    st.caption("Interprets only the selected dashboard context. The output supports exploration, not causal conclusions.")
 
     question = st.text_area(
         "Optional question",
@@ -588,6 +625,11 @@ with ai_col:
 
     if "ai_answer" not in st.session_state:
         st.session_state.ai_answer = ""
+
+    st.markdown(
+        f"**Current context:** {university}, {year}<br>Overall score: **{selected['overall_score']:.1f}** | Rank: **{int(selected['overall_rank_year'])}/61**",
+        unsafe_allow_html=True,
+    )
 
     if st.button("Analyze current view", type="primary"):
         with st.spinner("Generating interpretation..."):
