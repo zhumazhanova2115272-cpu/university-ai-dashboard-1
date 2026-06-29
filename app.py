@@ -107,11 +107,17 @@ def selected_context(row: pd.Series, view_type: str = "University Profile") -> d
         "economic_financial_sustainability_index",
         "placement_data_completeness",
         "student_staff_ratio",
+        "enrolled_students",
+        "second_year_retention_pct",
+        "inactive_students_reversed_score",
+        "graduation_within_standard_pct",
         "employment_index",
         "graduation_intensity",
         "publications_per_teaching_staff",
         "citations_per_publication",
         "h_index",
+        "highly_cited_researchers",
+        "nature_science_articles",
     ]
     context = {field: clean_value(row.get(field)) for field in fields if field in row.index}
     context["view_type"] = view_type
@@ -217,33 +223,75 @@ def make_indicator_bar(row: pd.Series, indicators: dict[str, str]) -> alt.Chart:
     )
 
 
+
+def gap_direction(gap: float, threshold: float = 5.0) -> str:
+    if gap >= threshold:
+        return "clearly above"
+    if gap <= -threshold:
+        return "clearly below"
+    return "close to"
+
+
+def score_band_analysis(value: float) -> str:
+    if value >= 75:
+        return "strong"
+    if value >= 65:
+        return "above-average"
+    if value >= 55:
+        return "moderate"
+    if value >= 45:
+        return "relatively weak"
+    return "weak"
+
+
+def spread_analysis(values: list[float]) -> str:
+    spread = max(values) - min(values)
+    if spread >= 25:
+        return "uneven profile with large differences between dimensions"
+    if spread >= 12:
+        return "mixed profile with visible strengths and weaker areas"
+    return "balanced profile with no very large gap between dimensions"
+
+
 def local_overview_interpretation(context: dict, user_question: str | None = None) -> str:
-    top_names = ", ".join([x["university"] for x in context.get("top_universities", [])])
-    low_names = ", ".join([x["university"] for x in context.get("lowest_universities", [])])
-    avg = float(context.get("average_overall_score") or 0)
+    top = context.get("top_universities", [])
+    low = context.get("lowest_universities", [])
+    top_names = ", ".join([x["university"] for x in top])
+    low_names = ", ".join([x["university"] for x in low])
+    avg_overall = float(context.get("average_overall_score") or 0)
+    avg_teaching = float(context.get("average_teaching_score") or 0)
+    avg_placement = float(context.get("average_placement_score") or 0)
+    avg_research = float(context.get("average_research_score") or 0)
+    avg_financial = float(context.get("average_financial_score") or 0)
+    dims = {"teaching": avg_teaching, "placement": avg_placement, "research": avg_research, "financial": avg_financial}
+    strongest = max(dims, key=dims.get)
+    weakest = min(dims, key=dims.get)
+    spread = max(dims.values()) - min(dims.values())
     q = f"\n\n**User question**\n\n{user_question}" if user_question else ""
     return f"""
-**Overview interpretation**
+**Overview analysis**
 
-The current overview page shows **{context.get('number_of_universities')} universities** for **{context.get('year')}** after applying the selected filters. The average overall score in this filtered view is **{avg:.1f}**.
+The filtered system contains **{context.get('number_of_universities')} universities** in **{context.get('year')}**. The average overall score is **{avg_overall:.1f}**, which indicates a **{score_band_analysis(avg_overall)}** system-level profile for the current selection.
 
-**Main visible pattern**
+**Main pattern, not just numbers**
 
-- The top universities in this filtered view are: **{top_names}**.
-- The lowest-scoring universities in this filtered view are: **{low_names}**.
-- The average teaching, placement, research, and financial scores should be compared together because the dashboard is designed to show multidimensional profiles rather than a single ranking.
+The average profile is strongest in **{strongest}** and weakest in **{weakest}**. The gap between the strongest and weakest average dimensions is **{spread:.1f} points**, so this filtered group looks like a **{spread_analysis(list(dims.values()))}**. This means that the current selection should not be interpreted through the overall score alone: the dashboard suggests that one dimension is shaping the profile more than the others.
 
-**Suggested next visual exploration**
+**Distribution reading**
 
-Open the **University Profile** page for one top university and one lower-scoring university, then use **University Comparison** to compare the two profiles directly.
+The top universities in this view are **{top_names}**, while the lower end of the distribution includes **{low_names}**. This does not mean that the lower-ranked universities are globally weak; it means that, under the current filters and normalized dashboard scores, their multidimensional profile is less favorable than the group leaders.
 
-**Important limitation**
+**What the page suggests**
 
-This overview is descriptive and exploratory. It does not imply causality or policy recommendations.{q}
+The most useful next step is to compare one top university with one lower-scoring university. This can reveal whether the difference is driven by research, finance, teaching, or placement rather than by a general performance gap.
+
+**Limit**
+
+This is an exploratory system-level reading. It does not explain causes and does not produce policy recommendations.{q}
 """
 
 
-def local_single_interpretation(context: dict, user_question: str | None = None) -> str:
+def local_profile_interpretation(context: dict, user_question: str | None = None) -> str:
     overall = float(context.get("overall_score") or 0)
     teaching = float(context.get("teaching_score") or 0)
     placement = float(context.get("placement_score") or 0)
@@ -252,39 +300,148 @@ def local_single_interpretation(context: dict, user_question: str | None = None)
     national = float(context.get("national_avg_overall_score") or 0)
     macro = float(context.get("macro_area_avg_overall_score") or 0)
     rank = int(context.get("overall_rank_year") or 0)
-    dimensions = {"teaching": teaching, "placement": placement, "research": research, "financial": financial}
-    strongest = max(dimensions, key=dimensions.get)
-    weakest = min(dimensions, key=dimensions.get)
+    dims = {"teaching": teaching, "placement": placement, "research": research, "financial": financial}
+    strongest = max(dims, key=dims.get)
+    weakest = min(dims, key=dims.get)
     national_gap = overall - national
     macro_gap = overall - macro
-    q = f"\n\n**User question**\n\n{user_question}\n\nThe answer should focus only on the indicators visible in the current page." if user_question else ""
+    spread = max(dims.values()) - min(dims.values())
+    q = f"\n\n**User question**\n\n{user_question}\n\nThe answer should use only the University Profile indicators and benchmark bars." if user_question else ""
     return f"""
-**{context.get('view_type')} interpretation**
+**University Profile analysis**
 
-{context.get('university')} in **{context.get('year')}** has a **{score_label(overall)}** overall profile with an overall score of **{overall:.1f}** and rank **{rank}/61**.
+**{context.get('university')}** in **{context.get('year')}** has an overall score of **{overall:.1f}** and rank **{rank}/61**. This places it in a **{score_band_analysis(overall)}** position in the dashboard ranking.
 
-**Benchmark comparison**
+**Benchmark interpretation**
 
-- It is **{abs(national_gap):.1f} points {'above' if national_gap >= 0 else 'below'}** the national average.
-- It is **{abs(macro_gap):.1f} points {'above' if macro_gap >= 0 else 'below'}** the macro-area average.
+Compared with the national average, the university is **{gap_direction(national_gap)}** the benchmark by **{abs(national_gap):.1f} points**. Compared with the macro-area average, it is **{gap_direction(macro_gap)}** the benchmark by **{abs(macro_gap):.1f} points**. This means the selected university is not only being evaluated in isolation: its profile is being read against both the national system and its territorial context.
 
-**Strengths**
+**Profile shape**
 
-- The strongest visible dimension is **{strongest}** with a score of **{dimensions[strongest]:.1f}**.
+The profile is strongest in **{strongest}** (**{dims[strongest]:.1f}**) and weakest in **{weakest}** (**{dims[weakest]:.1f}**). The internal spread is **{spread:.1f} points**, so the university shows a **{spread_analysis(list(dims.values()))}**. In practical terms, this page suggests that the university's overall position is driven more by its strongest dimension than by equal performance across all dimensions.
 
-**Weaknesses / points to monitor**
+**Interpretive reading**
 
-- The weakest visible dimension is **{weakest}** with a score of **{dimensions[weakest]:.1f}**.
-- The financial profile should be checked together with FFO per student, operating cost per student, and personnel cost share.
+If **research** is the strongest dimension, the university is more research-oriented in this profile. If **financial** is the weakest, the dashboard suggests that financial conditions should be inspected before interpreting the overall score as fully balanced. If **placement** or **teaching** is weak, the student lifecycle indicators should be checked on the Teaching and Research page.
 
-**Suggested next visual exploration**
+**Next visual step**
 
-Use the **University Comparison** page to compare this university with a similar institution from **{context.get('region')}** or **{context.get('macro_area')}**.
+Use the time trend to check whether this profile is stable from 2020 to 2023. If the same strong/weak pattern remains across years, it is more meaningful than a one-year difference.
 
-**Important limitation**
+**Limit**
 
-This is a dashboard-based interpretation. It does not imply causality or policy recommendations.{q}
+This is a descriptive dashboard interpretation. It identifies patterns and gaps, but it does not explain their causes.{q}
 """
+
+
+def local_finance_interpretation(context: dict, user_question: str | None = None) -> str:
+    uni = context.get("university")
+    year = context.get("year")
+    financial = float(context.get("financial_score") or 0)
+    overall = float(context.get("overall_score") or 0)
+    x_label = context.get("finance_x_axis", "selected financial indicator")
+    y_label = context.get("score_y_axis", "selected score")
+    x_value = context.get("selected_x_value")
+    y_value = context.get("selected_y_value")
+    ffo = context.get("ffo_per_student")
+    op_cost = context.get("operating_cost_per_student")
+    personnel = context.get("personnel_cost_share")
+    public_share = context.get("public_revenue_share")
+    student_share = context.get("student_contribution_share")
+    perf_share = context.get("performance_quota_share")
+    gap = financial - overall
+    if gap >= 8:
+        finance_reading = "the financial dimension is stronger than the overall profile"
+    elif gap <= -8:
+        finance_reading = "the financial dimension is weaker than the overall profile"
+    else:
+        finance_reading = "the financial dimension is broadly aligned with the overall profile"
+    q = f"\n\n**User question**\n\n{user_question}\n\nThe answer should focus on the Finance Explorer page only." if user_question else ""
+    return f"""
+**Finance Explorer analysis**
+
+This page reads the financial position of **{uni}** in **{year}** through the selected scatterplot: **{x_label}** on the x-axis and **{y_label}** on the y-axis.
+
+**What the selected point means**
+
+The selected university has **{format_number(x_value, 2)}** on the financial x-axis and **{format_number(y_value, 1)}** on the selected score y-axis. Its financial score is **{financial:.1f}**, while its overall score is **{overall:.1f}**. Therefore, **{finance_reading}**.
+
+**Financial structure reading**
+
+The financial profile should be interpreted as a combination of funding intensity, cost pressure, and revenue structure. FFO per student is **{format_number(ffo, 0)}**, operating cost per student is **{format_number(op_cost, 0)}**, and personnel cost share is **{format_number(personnel, 2)}**. A high operating cost or personnel share does not automatically mean poor performance, but it may indicate that the financial score should be read together with university size and staffing structure.
+
+Public revenue share is **{format_number(public_share, 2)}**, while student contribution share is **{format_number(student_share, 2)}**. This helps distinguish universities that rely more on public funding from those with a higher student contribution component. Performance quota share is **{format_number(perf_share, 2)}**, which can be used as an additional signal of how much performance-based funding appears in the financial profile.
+
+**Analytical interpretation**
+
+If the selected point is far from the main cluster in the scatterplot, the university may have a distinctive funding-cost configuration. If it lies inside the cluster, the financial profile is less exceptional and should be interpreted through smaller differences in cost and revenue composition rather than through an outlier story.
+
+**Next visual step**
+
+Change the x-axis from **{x_label}** to another financial indicator. If the university remains in a similar relative position across financial indicators, the pattern is more robust; if it moves substantially, the interpretation depends on the chosen financial variable.
+
+**Limit**
+
+This page shows association and positioning only. It does not estimate the causal impact of funding or costs on performance.{q}
+"""
+
+
+def local_teaching_research_interpretation(context: dict, user_question: str | None = None) -> str:
+    uni = context.get("university")
+    year = context.get("year")
+    teaching = float(context.get("teaching_score") or 0)
+    placement = float(context.get("placement_score") or 0)
+    research = float(context.get("research_score") or 0)
+    retention = context.get("second_year_retention_pct")
+    inactive = context.get("inactive_students_reversed_score")
+    grad_std = context.get("graduation_within_standard_pct")
+    employment = context.get("employment_index")
+    pub_staff = context.get("publications_per_teaching_staff")
+    cites_pub = context.get("citations_per_publication")
+    h_index = context.get("h_index")
+    hcr = context.get("highly_cited_researchers")
+    ns = context.get("nature_science_articles")
+    tr_gap = research - teaching
+    rp_gap = research - placement
+    if tr_gap >= 10:
+        orientation = "research-oriented"
+        orientation_text = "research performance is visibly stronger than the teaching dimension"
+    elif tr_gap <= -10:
+        orientation = "teaching-oriented"
+        orientation_text = "teaching indicators are visibly stronger than the research dimension"
+    else:
+        orientation = "balanced between teaching and research"
+        orientation_text = "teaching and research are relatively close, so neither side dominates the profile"
+    q = f"\n\n**User question**\n\n{user_question}\n\nThe answer should focus on the Teaching and Research page indicators." if user_question else ""
+    return f"""
+**Teaching and Research analysis**
+
+For **{uni}** in **{year}**, the dashboard separates the academic profile into teaching, placement, and research. The visible profile is **{orientation}** because **{orientation_text}**.
+
+**How to read the teaching side**
+
+Teaching score is **{teaching:.1f}** and placement score is **{placement:.1f}**. Retention is **{format_number(retention, 1)}**, inactive students reversed score is **{format_number(inactive, 1)}**, graduation within standard duration is **{format_number(grad_std, 1)}**, and employment index is **{format_number(employment, 1)}**. Together, these indicators describe the student lifecycle: continuation, regular progression, completion, and labor-market outcome.
+
+**How to read the research side**
+
+Research score is **{research:.1f}**. Publications per teaching staff are **{format_number(pub_staff, 2)}**, citations per publication are **{format_number(cites_pub, 2)}**, H-index is **{format_number(h_index, 1)}**, highly cited researchers are **{format_number(hcr, 0)}**, and Nature/Science articles are **{format_number(ns, 0)}**. These indicators do not all measure the same thing: some reflect volume, others impact or excellence.
+
+**Analytical interpretation**
+
+The gap between research and teaching is **{tr_gap:.1f} points**, and the gap between research and placement is **{rp_gap:.1f} points**. If research is much higher than teaching or placement, the university looks more research-intensive than student-outcome-oriented in this dashboard view. If teaching or placement is close to research, the profile is more balanced and should not be reduced to a research-only interpretation.
+
+**Next visual step**
+
+Use the Teaching vs Research positioning chart to find universities with a similar balance, then compare one of them with **{uni}** on the University Comparison page.
+
+**Limit**
+
+This page identifies academic profile patterns. It does not explain why research, teaching, or placement indicators differ.{q}
+"""
+
+
+def local_single_interpretation(context: dict, user_question: str | None = None) -> str:
+    return local_profile_interpretation(context, user_question)
 
 
 def local_comparison_interpretation(context: dict, user_question: str | None = None) -> str:
@@ -302,49 +459,59 @@ def local_comparison_interpretation(context: dict, user_question: str | None = N
     overall_gap = dims["overall"]
     leader = a["university"] if overall_gap >= 0 else b["university"]
     follower = b["university"] if overall_gap >= 0 else a["university"]
+    a_dims = [float(a["teaching_score"]), float(a["placement_score"]), float(a["research_score"]), float(a["financial_score"])]
+    b_dims = [float(b["teaching_score"]), float(b["placement_score"]), float(b["research_score"]), float(b["financial_score"])]
+    a_balance = spread_analysis(a_dims)
+    b_balance = spread_analysis(b_dims)
     q = f"\n\n**User question**\n\n{user_question}\n\nThe answer should focus only on the two selected universities and the comparison charts." if user_question else ""
     return f"""
-**University comparison interpretation**
+**University Comparison analysis**
 
-In **{context.get('year')}**, **{leader}** has a higher overall score than **{follower}** by **{abs(overall_gap):.1f} points**.
+In **{context.get('year')}**, **{leader}** has the higher overall score, leading **{follower}** by **{abs(overall_gap):.1f} points**. This is not just a ranking difference: the comparison page shows which dimension is responsible for the gap.
 
-**Largest visible gap**
+**Where the comparison is really different**
 
-- The largest difference is in **{largest_dim}**, where the gap is **{abs(dims[largest_dim]):.1f} points**.
+The largest visible difference is in **{largest_dim}**, with a gap of **{abs(dims[largest_dim]):.1f} points**. This suggests that the comparison should be interpreted mainly through **{largest_dim}**, rather than only through the overall score.
 
-**Side-by-side profile**
+**Profile interpretation**
 
-- **{a['university']}**: overall **{float(a['overall_score']):.1f}**, rank **{int(a['overall_rank_year'])}/61**, research **{float(a['research_score']):.1f}**, financial **{float(a['financial_score']):.1f}**.
-- **{b['university']}**: overall **{float(b['overall_score']):.1f}**, rank **{int(b['overall_rank_year'])}/61**, research **{float(b['research_score']):.1f}**, financial **{float(b['financial_score']):.1f}**.
+- **{a['university']}** has overall **{float(a['overall_score']):.1f}** and rank **{int(a['overall_rank_year'])}/61**. Its internal profile is a **{a_balance}**.
+- **{b['university']}** has overall **{float(b['overall_score']):.1f}** and rank **{int(b['overall_rank_year'])}/61**. Its internal profile is a **{b_balance}**.
 
-**What to inspect next**
+If one university has a higher research score but similar or weaker financial score, the comparison suggests a specialization pattern rather than uniformly better performance. If one university is higher across all dimensions, the difference is broader and more consistent.
 
-Check whether the same gap is stable over 2020-2023 in the trend chart. If the gap appears only in one year, it should be interpreted cautiously.
+**Next visual step**
 
-**Important limitation**
+Check the trend chart for 2020-2023. A one-year gap should be interpreted cautiously, while a persistent gap across years is a stronger descriptive pattern.
 
-This comparison is descriptive. It does not explain why one university performs better and does not imply causality.{q}
+**Limit**
+
+This is a descriptive comparison. It does not explain why one university is ahead and does not imply causal conclusions.{q}
 """
 
 
 def local_methodology_interpretation(context: dict, user_question: str | None = None) -> str:
     q = f"\n\n**User question**\n\n{user_question}" if user_question else ""
     return f"""
-**Data and methodology interpretation**
+**Data and methodology analysis**
 
-This page documents the dataset and the dashboard logic. The dashboard uses a curated prototype dataset for Italian universities over **2020-2023**.
+This page explains how the dashboard should be interpreted. The dataset is a curated prototype dataset for Italian universities over **2020-2023**, designed for visual analytics rather than for causal estimation.
 
-**Important methodological point**
+**Why this matters analytically**
 
-The score fields are **dashboard-based normalized profile scores**, not DEA or SFA efficiency estimates. They are designed to support visual exploration across teaching, placement, research, and financial dimensions.
+The score fields are **dashboard-based normalized profile scores**, not DEA or SFA efficiency estimates. This means they are useful for comparison, visualization, and profile interpretation, but they should not be presented as final econometric efficiency measures.
 
-**How to use this page**
+**How to read the dashboard responsibly**
 
-Use the downloadable filtered dataset for transparency and reproducibility. Use the visible AI input to check what information is passed to the assistant.
+The dashboard is strongest when used to identify patterns: strong and weak dimensions, outliers, benchmark gaps, and differences between universities. It should not be used to claim that one variable causes another variable to improve or decline.
 
-**Important limitation**
+**Methodological value**
 
-The dashboard supports interpretation and comparison, but it does not produce causal conclusions or autonomous policy recommendations.{q}
+The main contribution is the transformation of a complex multidimensional dataset into an interactive visual analytics environment with an AI-assisted interpretation layer. This supports interpretation beyond static rankings and tables.
+
+**Limit**
+
+The dashboard supports exploration and explanation of visible patterns, but it does not produce causal conclusions or autonomous policy recommendations.{q}
 """
 
 
@@ -352,8 +519,14 @@ def generate_local_interpretation(context: dict, user_question: str | None = Non
     view_type = context.get("view_type")
     if view_type == "Overview":
         return local_overview_interpretation(context, user_question)
+    if view_type == "University Profile":
+        return local_profile_interpretation(context, user_question)
     if view_type == "University Comparison":
         return local_comparison_interpretation(context, user_question)
+    if view_type == "Finance Explorer":
+        return local_finance_interpretation(context, user_question)
+    if view_type == "Teaching and Research":
+        return local_teaching_research_interpretation(context, user_question)
     if view_type == "Data and Methodology":
         return local_methodology_interpretation(context, user_question)
     return local_single_interpretation(context, user_question)
@@ -378,7 +551,12 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
             "Do not invent missing values.",
             "Do not make causal claims.",
             "Write in concise academic English.",
-            "Return: short summary, strengths, weaknesses or gaps, benchmark/comparison interpretation, suggested next visual exploration.",
+            "Return a page-specific interpretation: do not use a generic university profile unless the current page is University Profile.",
+            "For Finance Explorer, focus on financial indicators and scatterplot axes. For Teaching and Research, focus on teaching/research indicators. For Overview, focus on filtered system-level patterns. For University Comparison, focus on the two selected universities.",
+            "Write analysis, not a list of visible numbers. Use a few key numbers only when they support an interpretation.",
+            "Explain what the pattern means for the current page: profile shape, trade-offs, benchmark position, specialization, outlier behavior, or balance between dimensions.",
+            "Use phrases such as: this suggests, this indicates, this points to, this should be read as, but do not state causality.",
+            "Return: analytical summary, interpretation of the main pattern, strengths/trade-offs, what to inspect next, and limitation.",
         ],
         "current_dashboard_context": context,
         "user_question": user_question,
