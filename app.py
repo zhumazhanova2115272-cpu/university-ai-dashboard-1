@@ -328,3 +328,4 @@ with ai_col:
         "The AI assistant supports interpretation only. It does not provide causal conclusions "
         "or autonomous policy recommendations."
     )
+
