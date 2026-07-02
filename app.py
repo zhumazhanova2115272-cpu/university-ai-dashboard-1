@@ -13,8 +13,8 @@ try:
 except ImportError:
     OpenAI = None
 
-DATA_PATH = Path("data/university_dashboard_ready_dataset_v2_checked.xlsx")
-SHEET_NAME = "Dashboard_Ready_Data_v2"
+DATA_PATH = Path("data/university_dashboard_with_dea_efficiency.xlsx")
+SHEET_NAME = "Dashboard_Data_with_DEA"
 
 st.set_page_config(
     page_title="University Performance Dashboard",
@@ -118,6 +118,14 @@ def selected_context(row: pd.Series, view_type: str = "University Profile") -> d
         "h_index",
         "highly_cited_researchers",
         "nature_science_articles",
+        "staff_per_1000_students",
+        "non_academic_staff_per_1000_students",
+        "dea_vrs_efficiency_100",
+        "dea_crs_efficiency_100",
+        "dea_scale_efficiency_100",
+        "dea_vrs_rank_year",
+        "dea_crs_rank_year",
+        "efficiency_category",
     ]
     context = {field: clean_value(row.get(field)) for field in fields if field in row.index}
     context["view_type"] = view_type
@@ -139,6 +147,7 @@ def make_overview_context(filtered: pd.DataFrame, year: int, macro_area: str, re
         "average_placement_score": clean_value(filtered["placement_score"].mean()),
         "average_research_score": clean_value(filtered["research_score"].mean()),
         "average_financial_score": clean_value(filtered["financial_score"].mean()),
+        "average_dea_vrs_efficiency": clean_value(filtered["dea_vrs_efficiency_100"].mean()) if "dea_vrs_efficiency_100" in filtered.columns else None,
         "top_universities": top[["university", "overall_score", "overall_rank_year"]].to_dict("records"),
         "lowest_universities": bottom[["university", "overall_score", "overall_rank_year"]].to_dict("records"),
     }
@@ -170,6 +179,11 @@ def comparison_context(row_a: pd.Series, row_b: pd.Series) -> dict:
         "publications_per_teaching_staff",
         "citations_per_publication",
         "h_index",
+        "dea_vrs_efficiency_100",
+        "dea_crs_efficiency_100",
+        "dea_scale_efficiency_100",
+        "dea_vrs_rank_year",
+        "efficiency_category",
     ]
     a = {field: clean_value(row_a.get(field)) for field in fields if field in row_a.index}
     b = {field: clean_value(row_b.get(field)) for field in fields if field in row_b.index}
@@ -323,6 +337,138 @@ def add_teaching_research_position_context(context: dict, filtered_data: pd.Data
     context["teaching_research_position"] = cluster_label(teaching_pct, research_pct)
     return context
 
+
+
+def dimension_scores(row: pd.Series) -> dict[str, float]:
+    return {
+        "Teaching": float(row.get("teaching_score", 0) or 0),
+        "Placement": float(row.get("placement_score", 0) or 0),
+        "Research": float(row.get("research_score", 0) or 0),
+        "Financial": float(row.get("financial_score", 0) or 0),
+    }
+
+
+def classify_profile(row: pd.Series) -> str:
+    dims = dimension_scores(row)
+    values = list(dims.values())
+    strongest = max(dims, key=dims.get)
+    weakest = min(dims, key=dims.get)
+    spread = max(values) - min(values)
+    if spread <= 10:
+        return "Balanced profile"
+    if strongest == "Research" and dims["Research"] - sorted(values)[-2] >= 8:
+        return "Research-oriented profile"
+    if strongest == "Teaching" and dims["Teaching"] - sorted(values)[-2] >= 8:
+        return "Teaching-oriented profile"
+    if strongest == "Placement" and dims["Placement"] - sorted(values)[-2] >= 8:
+        return "Placement-oriented profile"
+    if weakest == "Financial" and max(values) - dims["Financial"] >= 12:
+        return "Finance-constrained profile"
+    return "Mixed profile"
+
+
+def strengths_weaknesses(row: pd.Series, comparison_data: pd.DataFrame) -> tuple[list[str], list[str]]:
+    strengths: list[str] = []
+    weaknesses: list[str] = []
+    dims = {
+        "Teaching": "teaching_score",
+        "Placement": "placement_score",
+        "Research": "research_score",
+        "Financial": "financial_score",
+        "Overall": "overall_score",
+    }
+    for label, col in dims.items():
+        if col in comparison_data.columns and col in row.index:
+            pct = percentile_position(comparison_data, col, row.get(col))
+            if pct is not None and pct >= 70:
+                strengths.append(f"{label} score is in the upper range of the current group ({pct:.0f}th percentile).")
+            elif pct is not None and pct <= 30:
+                weaknesses.append(f"{label} score is in the lower range of the current group ({pct:.0f}th percentile).")
+
+    dim_values = dimension_scores(row)
+    strongest = max(dim_values, key=dim_values.get)
+    weakest = min(dim_values, key=dim_values.get)
+    if dim_values[strongest] - dim_values[weakest] >= 12:
+        strengths.append(f"The strongest dimension is {strongest.lower()} ({dim_values[strongest]:.1f}).")
+        weaknesses.append(f"The weakest dimension is {weakest.lower()} ({dim_values[weakest]:.1f}), creating an uneven profile.")
+
+    if "dea_vrs_efficiency_100" in row.index and "dea_vrs_efficiency_100" in comparison_data.columns:
+        dea_pct = percentile_position(comparison_data, "dea_vrs_efficiency_100", row.get("dea_vrs_efficiency_100"))
+        if dea_pct is not None and dea_pct >= 70:
+            strengths.append(f"DEA-VRS efficiency is above most peers in the current group ({dea_pct:.0f}th percentile).")
+        elif dea_pct is not None and dea_pct <= 30:
+            weaknesses.append(f"DEA-VRS efficiency is below the central peer group ({dea_pct:.0f}th percentile).")
+
+    if not strengths:
+        strengths.append("No clear upper-tail strength is visible; the profile is mainly central/moderate.")
+    if not weaknesses:
+        weaknesses.append("No severe lower-tail weakness is visible in the current filtered group.")
+    return strengths[:4], weaknesses[:4]
+
+
+def percentile_badge(data: pd.DataFrame, column: str, value: Any) -> str:
+    pct = percentile_position(data, column, value)
+    if pct is None:
+        return "Percentile n/a"
+    return f"{pct:.0f}th percentile ({position_label(pct)})"
+
+
+def make_ranking_context(filtered_data: pd.DataFrame, metric_col: str, metric_label: str, selected_row: pd.Series, top_n: int) -> dict:
+    ranked = filtered_data.sort_values(metric_col, ascending=False).reset_index(drop=True)
+    selected_rank = int(ranked.index[ranked["university"].eq(selected_row["university"])][0] + 1) if selected_row["university"] in ranked["university"].values else None
+    return {
+        "view_type": "Ranking Explorer",
+        "year": clean_value(selected_row.get("year")),
+        "metric": metric_label,
+        "metric_column": metric_col,
+        "number_of_universities": int(filtered_data["university"].nunique()),
+        "selected_university": clean_value(selected_row.get("university")),
+        "selected_value": clean_value(selected_row.get(metric_col)),
+        "selected_rank_in_current_filter": selected_rank,
+        "selected_percentile_current_filter": clean_value(percentile_position(filtered_data, metric_col, selected_row.get(metric_col))),
+        "top_universities": ranked[["university", metric_col]].head(top_n).to_dict("records"),
+        "bottom_universities": ranked[["university", metric_col]].tail(top_n).to_dict("records"),
+    }
+
+
+def make_change_context(full_data: pd.DataFrame, selected_university: str, start_year: int, end_year: int) -> dict:
+    rows = full_data[(full_data["university"].eq(selected_university)) & (full_data["year"].isin([start_year, end_year]))].copy()
+    context = {
+        "view_type": "Time Dynamics / What Changed",
+        "university": selected_university,
+        "start_year": int(start_year),
+        "end_year": int(end_year),
+    }
+    if rows["year"].nunique() < 2:
+        context["note"] = "Selected university does not have both start and end year observations."
+        return context
+    start = rows[rows["year"].eq(start_year)].iloc[0]
+    end = rows[rows["year"].eq(end_year)].iloc[0]
+    change_cols = ["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"]
+    if "dea_vrs_efficiency_100" in full_data.columns:
+        change_cols.append("dea_vrs_efficiency_100")
+    changes = {col: clean_value(end.get(col) - start.get(col)) for col in change_cols if col in rows.columns}
+    largest_driver = max(changes, key=lambda k: abs(float(changes[k] or 0))) if changes else None
+    context.update(
+        {
+            "start_values": {col: clean_value(start.get(col)) for col in change_cols if col in rows.columns},
+            "end_values": {col: clean_value(end.get(col)) for col in change_cols if col in rows.columns},
+            "changes_end_minus_start": changes,
+            "largest_change_dimension": largest_driver,
+        }
+    )
+    return context
+
+
+def make_dea_context(filtered_data: pd.DataFrame, selected_row: pd.Series) -> dict:
+    context = selected_context(selected_row, "DEA Efficiency Explorer")
+    for col in ["dea_vrs_efficiency_100", "dea_crs_efficiency_100", "dea_scale_efficiency_100", "overall_score", "teaching_score", "placement_score", "research_score"]:
+        if col in filtered_data.columns and col in selected_row.index:
+            series = numeric_series(filtered_data, col)
+            context[f"{col}_median_current_filter"] = clean_value(series.median()) if not series.empty else None
+            context[f"{col}_percentile_current_filter"] = clean_value(percentile_position(filtered_data, col, selected_row.get(col)))
+            context[f"{col}_position_label"] = position_label(context[f"{col}_percentile_current_filter"])
+    return context
 
 
 def gap_direction(gap: float, threshold: float = 5.0) -> str:
@@ -654,6 +800,129 @@ The dashboard supports exploration and explanation of visible patterns, but it d
 """
 
 
+def local_ranking_interpretation(context: dict, user_question: str | None = None) -> str:
+    metric = context.get("metric")
+    selected = context.get("selected_university")
+    selected_value = float(context.get("selected_value") or 0)
+    rank = context.get("selected_rank_in_current_filter")
+    n = context.get("number_of_universities")
+    pct = context.get("selected_percentile_current_filter")
+    top = context.get("top_universities", [])
+    bottom = context.get("bottom_universities", [])
+    top_names = ", ".join([x.get("university", "") for x in top[:3]])
+    bottom_names = ", ".join([x.get("university", "") for x in bottom[:3]])
+    q = f"\n\n**User question**\n\n{user_question}" if user_question else ""
+    return f"""
+**Ranking Explorer analysis**
+
+This page ranks the current filtered group by **{metric}**. **{selected}** has a value of **{selected_value:.1f}** and is ranked **{rank}/{n}** in the current selection, around the **{format_number(pct, 0)}th percentile**.
+
+**Analytical reading**
+
+The ranking should be read as a dimension-specific benchmark, not as a complete evaluation of the university. If the selected metric is overall score, it summarizes the dashboard profile. If the selected metric is DEA-VRS efficiency, it reads the resource-to-output transformation instead of pure performance level. This distinction matters because a high-performing university is not always the most efficient one.
+
+**Distribution reading**
+
+The top end of the ranking includes **{top_names}**, while the lower end includes **{bottom_names}**. This helps identify whether the selected university is close to the leaders, in the central group, or closer to the lower tail.
+
+**Recommended next check**
+
+Switch the ranking metric from overall score to DEA-VRS efficiency. If the selected university keeps a similar position, its performance and efficiency stories are aligned. If the position changes, the dashboard reveals a difference between performance level and resource-adjusted efficiency.
+
+**Limit**
+
+This page is descriptive. Rankings depend on the selected metric, year, and filters.{q}
+"""
+
+
+def local_change_interpretation(context: dict, user_question: str | None = None) -> str:
+    uni = context.get("university")
+    start_year = context.get("start_year")
+    end_year = context.get("end_year")
+    changes = context.get("changes_end_minus_start", {})
+    if not changes:
+        return f"**Time dynamics analysis**\n\nThe dashboard cannot compute a change for **{uni}** because one of the selected years is missing."
+    overall_change = float(changes.get("overall_score") or 0)
+    largest = context.get("largest_change_dimension")
+    largest_change = float(changes.get(largest) or 0) if largest else 0
+    direction = "improved" if overall_change > 1 else "declined" if overall_change < -1 else "remained broadly stable"
+    q = f"\n\n**User question**\n\n{user_question}" if user_question else ""
+    return f"""
+**Time dynamics analysis**
+
+From **{start_year}** to **{end_year}**, **{uni}** **{direction}** in overall score, with a change of **{overall_change:+.1f} points**.
+
+**What changed most**
+
+The largest visible movement is in **{str(largest).replace('_', ' ')}**, with a change of **{largest_change:+.1f} points**. This suggests that the time trend should not be interpreted only through the overall score: the dashboard shows which dimension is driving the movement.
+
+**Analytical interpretation**
+
+If the overall score increased but one dimension declined, the university's profile became stronger but less balanced. If all dimensions moved in the same direction, the change is broader and more consistent. If DEA efficiency moved differently from the performance scores, the university's resource-adjusted position changed differently from its pure performance profile.
+
+**Recommended next check**
+
+Open the University Profile page and inspect whether the same strong/weak dimensions remain visible in the final year. Persistent patterns are more meaningful than a one-year fluctuation.
+
+**Limit**
+
+The page describes changes over time. It does not explain why the changes occurred.{q}
+"""
+
+
+def local_dea_interpretation(context: dict, user_question: str | None = None) -> str:
+    uni = context.get("university")
+    year = context.get("year")
+    vrs = float(context.get("dea_vrs_efficiency_100") or 0)
+    crs = float(context.get("dea_crs_efficiency_100") or 0)
+    scale = float(context.get("dea_scale_efficiency_100") or 0)
+    rank = context.get("dea_vrs_rank_year")
+    category = context.get("efficiency_category")
+    vrs_pct = context.get("dea_vrs_efficiency_100_percentile_current_filter")
+    vrs_pos = context.get("dea_vrs_efficiency_100_position_label", "not available")
+    overall = float(context.get("overall_score") or 0)
+    overall_pct = context.get("overall_score_percentile_current_filter")
+    if vrs >= 99:
+        reading = "is on or very close to the DEA-VRS efficient frontier"
+    elif vrs >= 90:
+        reading = "is close to the efficient frontier, but still has some distance from the best peer combinations"
+    elif vrs >= 80:
+        reading = "has a moderate efficiency gap relative to the frontier"
+    else:
+        reading = "has a visible efficiency gap relative to the frontier"
+
+    if scale >= 95:
+        scale_reading = "scale efficiency is high, so the difference between CRS and VRS is limited"
+    elif scale >= 85:
+        scale_reading = "scale efficiency is moderate, so part of the gap may be connected with scale conditions"
+    else:
+        scale_reading = "scale efficiency is relatively low, so scale conditions should be inspected carefully"
+    q = f"\n\n**User question**\n\n{user_question}" if user_question else ""
+    return f"""
+**DEA Efficiency Explorer analysis**
+
+**{uni}** in **{year}** has a DEA-VRS efficiency score of **{vrs:.1f}/100** and DEA-VRS rank **{rank}/61**. In this specification, the university **{reading}**. Its efficiency category is **{category}**.
+
+**Efficiency versus performance**
+
+The university's overall dashboard score is **{overall:.1f}**, while its DEA-VRS efficiency is **{vrs:.1f}**. This comparison is important because overall score measures performance level, whereas DEA efficiency measures how well selected resources and cost indicators are transformed into teaching, placement, and research outputs.
+
+Within the current filtered group, the DEA-VRS score is in the **{vrs_pos}** around the **{format_number(vrs_pct, 0)}th percentile**. The overall score is around the **{format_number(overall_pct, 0)}th percentile**. If these two percentiles differ, the dashboard suggests a difference between performance strength and resource-adjusted efficiency.
+
+**Scale interpretation**
+
+The DEA-CRS score is **{crs:.1f}**, and scale efficiency is **{scale:.1f}**. Therefore, **{scale_reading}**. VRS is the main score here because universities differ strongly in size and scale.
+
+**Inputs and outputs used**
+
+The DEA layer uses funding/cost/staff indicators as inputs and teaching, placement, and research scores as outputs. Financial score is not used as an output because financial variables already appear on the input side.
+
+**Limit**
+
+DEA results depend on the selected inputs and outputs. The score is a descriptive benchmarking measure, not a causal estimate and not a final policy judgment.{q}
+"""
+
+
 def generate_local_interpretation(context: dict, user_question: str | None = None) -> str:
     view_type = context.get("view_type")
     if view_type == "Overview":
@@ -666,6 +935,12 @@ def generate_local_interpretation(context: dict, user_question: str | None = Non
         return local_finance_interpretation(context, user_question)
     if view_type == "Teaching and Research":
         return local_teaching_research_interpretation(context, user_question)
+    if view_type == "Ranking Explorer":
+        return local_ranking_interpretation(context, user_question)
+    if view_type == "Time Dynamics / What Changed":
+        return local_change_interpretation(context, user_question)
+    if view_type == "DEA Efficiency Explorer":
+        return local_dea_interpretation(context, user_question)
     if view_type == "Data and Methodology":
         return local_methodology_interpretation(context, user_question)
     return local_single_interpretation(context, user_question)
@@ -691,7 +966,7 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
             "Do not make causal claims.",
             "Write in concise academic English.",
             "Return a page-specific interpretation: do not use a generic university profile unless the current page is University Profile.",
-            "For Finance Explorer, focus on financial indicators and scatterplot axes. For Teaching and Research, focus on teaching/research indicators. For Overview, focus on filtered system-level patterns. For University Comparison, focus on the two selected universities.",
+            "For Finance Explorer, focus on financial indicators and scatterplot axes. For Teaching and Research, focus on teaching/research indicators. For Overview, focus on filtered system-level patterns. For University Comparison, focus on the two selected universities. For Ranking Explorer, focus on ranking position and metric choice. For Time Dynamics, focus on changes between years. For DEA Efficiency Explorer, focus on DEA-VRS, CRS, scale efficiency and resource-to-output interpretation.",
             "Write analysis, not a list of visible numbers. Use a few key numbers only when they support an interpretation.",
             "Use computed percentiles, medians, gap labels, and cluster-position fields whenever they are available.",
             "Explain what the pattern means for the current page: profile shape, trade-offs, benchmark position, specialization, outlier behavior, or balance between dimensions.",
@@ -799,6 +1074,9 @@ pages = [
     "University Profile",
     "University Comparison",
     "Finance Explorer",
+    "DEA Efficiency Explorer",
+    "Ranking Explorer",
+    "Time Dynamics / What Changed",
     "Teaching and Research",
     "Data and Methodology",
 ]
@@ -886,6 +1164,32 @@ with main_col:
         k3.metric("Teaching", f"{selected['teaching_score']:.1f}")
         k4.metric("Research", f"{selected['research_score']:.1f}")
         k5.metric("Financial", f"{selected['financial_score']:.1f}")
+
+        st.markdown("#### Profile classification and percentile badges")
+        badge_cols = st.columns(5)
+        badge_cols[0].info(f"Overall: {percentile_badge(filtered, 'overall_score', selected['overall_score'])}")
+        badge_cols[1].info(f"Teaching: {percentile_badge(filtered, 'teaching_score', selected['teaching_score'])}")
+        badge_cols[2].info(f"Placement: {percentile_badge(filtered, 'placement_score', selected['placement_score'])}")
+        badge_cols[3].info(f"Research: {percentile_badge(filtered, 'research_score', selected['research_score'])}")
+        badge_cols[4].info(f"Financial: {percentile_badge(filtered, 'financial_score', selected['financial_score'])}")
+
+        profile_type = classify_profile(selected)
+        strengths, weaknesses = strengths_weaknesses(selected, filtered)
+        active_context["profile_type"] = profile_type
+        active_context["strengths"] = strengths
+        active_context["weaknesses"] = weaknesses
+        sw1, sw2, sw3 = st.columns([1, 1, 1])
+        with sw1:
+            st.markdown("##### Profile type")
+            st.success(profile_type)
+        with sw2:
+            st.markdown("##### Main strengths")
+            for item in strengths:
+                st.write(f"- {item}")
+        with sw3:
+            st.markdown("##### Points to inspect")
+            for item in weaknesses:
+                st.write(f"- {item}")
 
         c1, c2 = st.columns(2)
         with c1:
@@ -1124,6 +1428,252 @@ with main_col:
         st.markdown("#### Selected university financial structure")
         st.altair_chart(make_indicator_bar(selected, finance_indicators), width="stretch")
 
+
+    elif page == "DEA Efficiency Explorer":
+        active_context = make_dea_context(filtered, selected)
+        st.markdown("### DEA efficiency explorer")
+        st.caption("This page adds an exploratory DEA efficiency layer. DEA-VRS is the main score because universities differ in size and scale.")
+
+        if "dea_vrs_efficiency_100" not in df.columns:
+            st.error("DEA columns are not available in the current dataset. Upload university_dashboard_with_dea_efficiency.xlsx and use the Dashboard_Data_with_DEA sheet.")
+        else:
+            d1, d2, d3, d4, d5 = st.columns(5)
+            d1.metric("DEA-VRS efficiency", format_number(selected.get("dea_vrs_efficiency_100"), 1))
+            d2.metric("DEA-VRS rank", f"{int(selected.get('dea_vrs_rank_year'))}/61")
+            d3.metric("DEA-CRS efficiency", format_number(selected.get("dea_crs_efficiency_100"), 1))
+            d4.metric("Scale efficiency", format_number(selected.get("dea_scale_efficiency_100"), 1))
+            d5.metric("Category", str(selected.get("efficiency_category")))
+
+            st.markdown("#### Efficiency position")
+            ecols = st.columns(3)
+            ecols[0].info(f"DEA-VRS: {percentile_badge(filtered, 'dea_vrs_efficiency_100', selected['dea_vrs_efficiency_100'])}")
+            ecols[1].info(f"DEA-CRS: {percentile_badge(filtered, 'dea_crs_efficiency_100', selected['dea_crs_efficiency_100'])}")
+            ecols[2].info(f"Scale efficiency: {percentile_badge(filtered, 'dea_scale_efficiency_100', selected['dea_scale_efficiency_100'])}")
+
+            dea_x_options = {
+                "FFO per student": "ffo_per_student",
+                "Operating cost per student": "operating_cost_per_student",
+                "Personnel cost share": "personnel_cost_share",
+                "Staff per 1000 students": "staff_per_1000_students",
+                "Non-academic staff per 1000 students": "non_academic_staff_per_1000_students",
+                "Overall score": "overall_score",
+            }
+            dea_x_label = st.selectbox("X-axis for DEA scatterplot", list(dea_x_options.keys()))
+            dea_x_col = dea_x_options[dea_x_label]
+            active_context["dea_scatter_x_axis"] = dea_x_label
+            active_context["dea_scatter_x_value"] = clean_value(selected.get(dea_x_col))
+
+            dea_data = filtered.copy()
+            dea_data["selected_flag"] = dea_data["university"].eq(university)
+            dea_scatter = (
+                alt.Chart(dea_data)
+                .mark_circle(size=90, opacity=0.65)
+                .encode(
+                    x=alt.X(f"{dea_x_col}:Q", title=dea_x_label),
+                    y=alt.Y("dea_vrs_efficiency_100:Q", title="DEA-VRS efficiency", scale=alt.Scale(domain=[0, 100])),
+                    color=alt.Color("efficiency_category:N", title="Efficiency category"),
+                    size=alt.Size("enrolled_students:Q", title="Enrolled students"),
+                    tooltip=["university", "region", "macro_area", alt.Tooltip(f"{dea_x_col}:Q", title=dea_x_label, format=",.2f"), alt.Tooltip("dea_vrs_efficiency_100:Q", title="DEA-VRS", format=".1f")],
+                )
+                .interactive()
+            )
+            selected_dea_point = (
+                alt.Chart(dea_data[dea_data["selected_flag"]])
+                .mark_circle(size=270, fillOpacity=0, stroke="black", strokeWidth=3)
+                .encode(x=alt.X(f"{dea_x_col}:Q"), y=alt.Y("dea_vrs_efficiency_100:Q"), tooltip=["university"])
+            )
+            selected_dea_label = (
+                alt.Chart(dea_data[dea_data["selected_flag"]])
+                .mark_text(align="left", dx=10, dy=-10, fontSize=12, fontWeight="bold")
+                .encode(x=alt.X(f"{dea_x_col}:Q"), y=alt.Y("dea_vrs_efficiency_100:Q"), text="university:N")
+            )
+            st.altair_chart((dea_scatter + selected_dea_point + selected_dea_label).properties(height=390), width="stretch")
+
+            dc1, dc2 = st.columns(2)
+            with dc1:
+                st.markdown("#### DEA trend, 2020-2023")
+                dea_trend = df[df["university"].eq(university)].sort_values("year")
+                dea_trend_long = dea_trend.melt(
+                    id_vars=["year", "university"],
+                    value_vars=["dea_vrs_efficiency_100", "dea_crs_efficiency_100", "dea_scale_efficiency_100"],
+                    var_name="DEA measure",
+                    value_name="Score",
+                )
+                dea_trend_chart = (
+                    alt.Chart(dea_trend_long)
+                    .mark_line(point=True)
+                    .encode(
+                        x=alt.X("year:O", title="Year"),
+                        y=alt.Y("Score:Q", scale=alt.Scale(domain=[0, 100])),
+                        color=alt.Color("DEA measure:N", title="DEA measure"),
+                        tooltip=["year", "DEA measure", alt.Tooltip("Score:Q", format=".1f")],
+                    )
+                    .properties(height=320)
+                )
+                st.altair_chart(dea_trend_chart, width="stretch")
+            with dc2:
+                st.markdown("#### Top 10 by DEA-VRS efficiency")
+                top_dea = filtered.sort_values("dea_vrs_efficiency_100", ascending=False).head(10)
+                top_dea_chart = (
+                    alt.Chart(top_dea)
+                    .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+                    .encode(
+                        x=alt.X("dea_vrs_efficiency_100:Q", title="DEA-VRS efficiency", scale=alt.Scale(domain=[0, 100])),
+                        y=alt.Y("university:N", sort="-x", title=None),
+                        tooltip=["university", alt.Tooltip("dea_vrs_efficiency_100:Q", format=".1f"), "efficiency_category"],
+                    )
+                    .properties(height=320)
+                )
+                st.altair_chart(top_dea_chart, width="stretch")
+
+            st.markdown("#### DEA inputs and outputs for selected university")
+            dea_table_cols = [
+                "university", "year", "ffo_per_student", "operating_cost_per_student", "personnel_cost_share",
+                "staff_per_1000_students", "non_academic_staff_per_1000_students", "teaching_score", "placement_score",
+                "research_score", "dea_vrs_efficiency_100", "dea_crs_efficiency_100", "dea_scale_efficiency_100",
+                "efficiency_category"
+            ]
+            st.dataframe(pd.DataFrame([selected])[dea_table_cols], width="stretch", hide_index=True)
+            st.info("DEA efficiency is a benchmarking result based on selected inputs and outputs. It should not be interpreted as a causal estimate or final policy judgment.")
+
+    elif page == "Ranking Explorer":
+        st.markdown("### Ranking explorer")
+        st.caption("Rank universities by any dashboard score or DEA efficiency measure within the current filters.")
+        metric_options = {
+            "Overall score": "overall_score",
+            "Teaching score": "teaching_score",
+            "Placement score": "placement_score",
+            "Research score": "research_score",
+            "Financial score": "financial_score",
+        }
+        if "dea_vrs_efficiency_100" in df.columns:
+            metric_options.update({
+                "DEA-VRS efficiency": "dea_vrs_efficiency_100",
+                "DEA-CRS efficiency": "dea_crs_efficiency_100",
+                "Scale efficiency": "dea_scale_efficiency_100",
+            })
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            ranking_metric_label = st.selectbox("Ranking metric", list(metric_options.keys()))
+        with rc2:
+            top_n = st.slider("Number of universities", min_value=5, max_value=min(25, len(filtered)), value=min(10, len(filtered)))
+        ranking_col = metric_options[ranking_metric_label]
+        active_context = make_ranking_context(filtered, ranking_col, ranking_metric_label, selected, top_n)
+
+        ranked = filtered.sort_values(ranking_col, ascending=False).reset_index(drop=True)
+        ranked["rank_current_filter"] = ranked.index + 1
+        rank_row = ranked[ranked["university"].eq(university)].iloc[0]
+        r1, r2, r3 = st.columns(3)
+        r1.metric("Selected value", format_number(rank_row[ranking_col], 1))
+        r2.metric("Rank in current filter", f"{int(rank_row['rank_current_filter'])}/{len(ranked)}")
+        r3.metric("Percentile", f"{percentile_position(filtered, ranking_col, selected[ranking_col]):.0f}th")
+
+        rank_chart_data = ranked.head(top_n).copy()
+        rank_chart_data["selected_flag"] = rank_chart_data["university"].eq(university)
+        rank_chart = (
+            alt.Chart(rank_chart_data)
+            .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+            .encode(
+                x=alt.X(f"{ranking_col}:Q", title=ranking_metric_label, scale=alt.Scale(domain=[0, 100])),
+                y=alt.Y("university:N", sort="-x", title=None),
+                color=alt.condition(alt.datum.selected_flag, alt.value("black"), alt.Color("macro_area:N", title="Macro-area")),
+                tooltip=["rank_current_filter", "university", "macro_area", alt.Tooltip(f"{ranking_col}:Q", title=ranking_metric_label, format=".1f")],
+            )
+            .properties(height=max(330, 28 * len(rank_chart_data)))
+        )
+        st.markdown(f"#### Top {top_n} universities by {ranking_metric_label}")
+        st.altair_chart(rank_chart, width="stretch")
+
+        show_cols = ["rank_current_filter", "university", "region", "macro_area", "size_class", ranking_col, "overall_score", "dea_vrs_efficiency_100"]
+        show_cols = [c for c in show_cols if c in ranked.columns]
+        st.markdown("#### Ranking table")
+        st.dataframe(ranked[show_cols], width="stretch", hide_index=True)
+
+    elif page == "Time Dynamics / What Changed":
+        st.markdown("### Time dynamics / What changed?")
+        st.caption("Compare how the selected university changed between two years and identify which dimension moved the most.")
+        all_years = sorted(df["year"].unique())
+        tc1, tc2 = st.columns(2)
+        with tc1:
+            start_year = st.selectbox("Start year", all_years, index=0)
+        with tc2:
+            end_year = st.selectbox("End year", all_years, index=len(all_years) - 1)
+        if start_year >= end_year:
+            st.warning("Choose an end year later than the start year.")
+            active_context = {"view_type": "Time Dynamics / What Changed", "university": university, "note": "Invalid year range"}
+        else:
+            active_context = make_change_context(df, university, start_year, end_year)
+            uni_years = df[(df["university"].eq(university)) & (df["year"].isin([start_year, end_year]))].sort_values("year")
+            if uni_years["year"].nunique() < 2:
+                st.error("The selected university does not have data for both selected years.")
+            else:
+                start_row = uni_years[uni_years["year"].eq(start_year)].iloc[0]
+                end_row = uni_years[uni_years["year"].eq(end_year)].iloc[0]
+                change_cols = ["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"]
+                if "dea_vrs_efficiency_100" in df.columns:
+                    change_cols.append("dea_vrs_efficiency_100")
+                change_rows = []
+                for col in change_cols:
+                    change_rows.append({
+                        "Dimension": col.replace("_score", "").replace("dea_vrs_efficiency_100", "DEA-VRS efficiency").replace("_", " ").title(),
+                        "Start": float(start_row[col]),
+                        "End": float(end_row[col]),
+                        "Change": float(end_row[col] - start_row[col]),
+                    })
+                change_df = pd.DataFrame(change_rows)
+                tcards = st.columns(4)
+                tcards[0].metric("Overall change", f"{end_row['overall_score'] - start_row['overall_score']:+.1f}")
+                tcards[1].metric("Teaching change", f"{end_row['teaching_score'] - start_row['teaching_score']:+.1f}")
+                tcards[2].metric("Research change", f"{end_row['research_score'] - start_row['research_score']:+.1f}")
+                if "dea_vrs_efficiency_100" in df.columns:
+                    tcards[3].metric("DEA-VRS change", f"{end_row['dea_vrs_efficiency_100'] - start_row['dea_vrs_efficiency_100']:+.1f}")
+                else:
+                    tcards[3].metric("Financial change", f"{end_row['financial_score'] - start_row['financial_score']:+.1f}")
+
+                change_chart = (
+                    alt.Chart(change_df)
+                    .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
+                    .encode(
+                        x=alt.X("Change:Q", title=f"Change from {start_year} to {end_year}"),
+                        y=alt.Y("Dimension:N", sort=None, title=None),
+                        color=alt.condition(alt.datum.Change >= 0, alt.value("#4c78a8"), alt.value("#e45756")),
+                        tooltip=["Dimension", alt.Tooltip("Start:Q", format=".1f"), alt.Tooltip("End:Q", format=".1f"), alt.Tooltip("Change:Q", format="+.1f")],
+                    )
+                    .properties(height=330)
+                )
+                st.markdown("#### Change by dimension")
+                st.altair_chart(change_chart, width="stretch")
+
+                trend_df = df[df["university"].eq(university)].sort_values("year")
+                trend_cols = ["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"]
+                if "dea_vrs_efficiency_100" in df.columns:
+                    trend_cols.append("dea_vrs_efficiency_100")
+                trend_long = trend_df.melt(id_vars=["year", "university"], value_vars=trend_cols, var_name="Metric", value_name="Value")
+                trend_chart = (
+                    alt.Chart(trend_long)
+                    .mark_line(point=True)
+                    .encode(
+                        x=alt.X("year:O", title="Year"),
+                        y=alt.Y("Value:Q", scale=alt.Scale(domain=[0, 100])),
+                        color=alt.Color("Metric:N", title="Metric"),
+                        tooltip=["year", "Metric", alt.Tooltip("Value:Q", format=".1f")],
+                    )
+                    .properties(height=330)
+                )
+                st.markdown("#### Full trend, 2020-2023")
+                st.altair_chart(trend_chart, width="stretch")
+
+                st.markdown("#### Universities with largest overall improvement / decline")
+                start_group = df[df["year"].eq(start_year)][["university", "overall_score"]].rename(columns={"overall_score": "overall_start"})
+                end_group = df[df["year"].eq(end_year)][["university", "overall_score", "region", "macro_area"]].rename(columns={"overall_score": "overall_end"})
+                changes_all = start_group.merge(end_group, on="university", how="inner")
+                changes_all["overall_change"] = changes_all["overall_end"] - changes_all["overall_start"]
+                ca, cb = st.columns(2)
+                with ca:
+                    st.dataframe(changes_all.sort_values("overall_change", ascending=False).head(10), width="stretch", hide_index=True)
+                with cb:
+                    st.dataframe(changes_all.sort_values("overall_change", ascending=True).head(10), width="stretch", hide_index=True)
+
     elif page == "Teaching and Research":
         active_context = selected_context(selected, page)
         active_context = add_teaching_research_position_context(active_context, filtered, selected)
@@ -1176,7 +1726,7 @@ with main_col:
             "view_type": "Data and Methodology",
             "year": int(year),
             "dataset_scope": "61 Italian universities, 2020-2023",
-            "score_definition": "Dashboard-based normalized profile scores, not DEA or SFA efficiency scores.",
+            "score_definition": "Dashboard-based normalized profile scores plus an exploratory DEA efficiency layer.",
             "current_filter_count": int(filtered["university"].nunique()),
             "macro_area_filter": macro_area,
             "region_filter": region,
@@ -1185,8 +1735,8 @@ with main_col:
         st.markdown("### Data and methodology")
         st.markdown(
             "The dashboard uses a curated prototype dataset covering 61 Italian universities over 2020-2023. "
-            "The score fields are dashboard-based normalized profile scores, not DEA or SFA efficiency scores. "
-            "They are intended for visual exploration and comparison."
+            "The score fields are dashboard-based normalized profile scores, while the DEA page adds an exploratory efficiency layer. "
+            "The DEA score is a descriptive benchmarking measure based on selected inputs and outputs, not a causal estimate."
         )
         st.markdown("#### Current page AI input")
         st.json(active_context)
@@ -1231,8 +1781,14 @@ with ai_col:
             f"**Current page:** {view_type}<br>**Context:** {active_context.get('number_of_universities')} universities, {active_context.get('year')}",
             unsafe_allow_html=True,
         )
+    elif view_type == "Ranking Explorer":
+        st.markdown(f"**Current page:** {view_type}<br>**Context:** ranking by {active_context.get('metric')}, {active_context.get('year')}", unsafe_allow_html=True)
+    elif view_type == "Time Dynamics / What Changed":
+        st.markdown(f"**Current page:** {view_type}<br>**Context:** {active_context.get('university')}, {active_context.get('start_year')} to {active_context.get('end_year')}", unsafe_allow_html=True)
+    elif view_type == "DEA Efficiency Explorer":
+        st.markdown(f"**Current page:** {view_type}<br>**Context:** {active_context.get('university')}, {active_context.get('year')}", unsafe_allow_html=True)
     elif view_type == "Data and Methodology":
-        st.markdown(f"**Current page:** {view_type}<br>**Context:** dataset and score construction", unsafe_allow_html=True)
+        st.markdown(f"**Current page:** {view_type}<br>**Context:** dataset, scores, and DEA methodology", unsafe_allow_html=True)
     else:
         st.markdown(
             f"**Current page:** {view_type}<br>**Context:** {active_context.get('university')}, {active_context.get('year')}",
