@@ -1556,7 +1556,25 @@ with main_col:
         with rc1:
             ranking_metric_label = st.selectbox("Ranking metric", list(metric_options.keys()))
         with rc2:
-            top_n = st.slider("Number of universities", min_value=5, max_value=min(25, len(filtered)), value=min(10, len(filtered)))
+            n_universities = len(filtered)
+
+            if n_universities == 0:
+                st.warning("No universities match the current filters.")
+                st.stop()
+            elif n_universities == 1:
+                top_n = 1
+                st.info("Only one university matches the current filters, so the ranking contains one institution.")
+            else:
+                max_top_n = min(25, n_universities)
+                default_top_n = min(10, max_top_n)
+
+                top_n = st.slider(
+                    "Number of universities",
+                    min_value=1,
+                    max_value=max_top_n,
+                    value=default_top_n,
+                    step=1,
+                )
         ranking_col = metric_options[ranking_metric_label]
         active_context = make_ranking_context(filtered, ranking_col, ranking_metric_label, selected, top_n)
 
