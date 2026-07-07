@@ -1603,9 +1603,16 @@ with main_col:
         st.altair_chart(rank_chart, width="stretch")
 
         show_cols = ["rank_current_filter", "university", "region", "macro_area", "size_class", ranking_col, "overall_score", "dea_vrs_efficiency_100"]
+
+        # Remove duplicate column names.
+        # This is necessary because ranking_col can be "overall_score" or "dea_vrs_efficiency_100",
+        # which are also included in the default display columns. PyArrow/Streamlit cannot render
+        # a dataframe with duplicate column names.
+        show_cols = list(dict.fromkeys(show_cols))
+
         show_cols = [c for c in show_cols if c in ranked.columns]
         st.markdown("#### Ranking table")
-        st.dataframe(ranked[show_cols], width="stretch", hide_index=True)
+        st.dataframe(ranked[show_cols].copy(), width="stretch", hide_index=True)
 
     elif page == "Time Dynamics / What Changed":
         st.markdown("### Time dynamics / What changed?")
