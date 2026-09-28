@@ -5,7 +5,7 @@ import html
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import altair as alt
 import pandas as pd
@@ -854,9 +854,12 @@ def linkify_evidence_citations(answer: str, evidence_items: list[dict]) -> str:
 
 
 def evidence_deep_link(item: dict) -> str:
-    field = quote(str(item.get("field", "")), safe="")
     anchor = item.get("anchor", "source-current-view")
-    return f"?focus_field={field}#{anchor}"
+    params = _navigation_state_params()
+    params["focus_field"] = str(item.get("field", ""))
+    # urlencode preserves spaces, slashes and comparison labels safely while keeping
+    # the browser in the same dashboard state after navigation.
+    return f"?{urlencode(params)}#{anchor}"
 
 
 def _same_tab_value_link(display: str, item: dict) -> str:
@@ -930,6 +933,51 @@ def current_focus_field() -> str | None:
     if isinstance(value, list):
         value = value[-1] if value else None
     return str(value) if value else None
+
+
+def _query_param_scalar(name: str) -> str | None:
+    try:
+        value = st.query_params.get(name)
+    except Exception:
+        value = None
+    if isinstance(value, list):
+        value = value[-1] if value else None
+    return str(value) if value not in (None, "") else None
+
+
+def _safe_widget_restore(key: str, options: list, query_name: str, fallback):
+    """Restore a widget value after an evidence deep-link reload without overriding live state."""
+    if key in st.session_state:
+        return
+    requested = _query_param_scalar(query_name)
+    if requested is not None:
+        for option in options:
+            if str(option) == requested:
+                st.session_state[key] = option
+                return
+    st.session_state[key] = fallback
+
+
+def _navigation_state_params() -> dict[str, str]:
+    """Serialize the visible dashboard state into evidence links.
+
+    Streamlit deep links can trigger a browser reload. Carrying the navigation state in
+    the URL lets the app restore the same page and sidebar selection immediately.
+    """
+    params: dict[str, str] = {}
+    mapping = {
+        "page": "dashboard_page_selector",
+        "year": "year_selector",
+        "macro_area": "macro_area_selector",
+        "region": "region_selector",
+        "size_class": "size_class_selector",
+        "university": "university_selector",
+    }
+    for query_name, state_key in mapping.items():
+        value = st.session_state.get(state_key)
+        if value not in (None, ""):
+            params[query_name] = str(value)
+    return params
 
 
 def page_focus_field(page_name: str) -> str | None:
@@ -1506,6 +1554,18 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
         return ensure_evidence_references(local_answer, evidence_items)
 
 
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=128)
+def cached_auto_interpretation(context_json: str) -> str:
+    """Cache automatic Companion prose across Streamlit sessions.
+
+    Evidence-number navigation can reload the page in some browsers. This server-side
+    cache prevents the same analytical state from calling the model again after that
+    navigation. Pure navigation focus is intentionally excluded from context_json.
+    """
+    context = json.loads(context_json)
+    return generate_ai_interpretation(context, None)
+
+
 def score_bar_chart(score_df: pd.DataFrame, focus_field: str | None = None) -> alt.Chart:
     data = score_df.copy()
     data["Focused"] = data["Field"].eq(focus_field) if "Field" in data.columns else False
@@ -1552,22 +1612,30 @@ st.caption("Interactive prototype for exploring teaching, placement, research, a
 with st.sidebar:
     st.header("Filters")
     years = sorted(df["year"].unique())
-    year = st.selectbox("Year", years, index=len(years) - 1)
+    _safe_widget_restore("year_selector", years, "year", years[-1])
+    year = st.selectbox("Year", years, key="year_selector")
 
     macro_area_options = ["All"] + sorted(df["macro_area"].dropna().unique())
-    macro_area = st.selectbox("Macro-area", macro_area_options)
+    _safe_widget_restore("macro_area_selector", macro_area_options, "macro_area", "All")
+    macro_area = st.selectbox("Macro-area", macro_area_options, key="macro_area_selector")
 
     region_base = df[df["year"] == year].copy()
     if macro_area != "All":
         region_base = region_base[region_base["macro_area"] == macro_area]
     region_options = ["All"] + sorted(region_base["region"].dropna().unique())
-    region = st.selectbox("Region", region_options)
+    if st.session_state.get("region_selector") not in region_options:
+        st.session_state.pop("region_selector", None)
+    _safe_widget_restore("region_selector", region_options, "region", "All")
+    region = st.selectbox("Region", region_options, key="region_selector")
 
     size_base = region_base.copy()
     if region != "All":
         size_base = size_base[size_base["region"] == region]
     size_options = ["All"] + sorted(size_base["size_class"].dropna().unique())
-    size_class = st.selectbox("Size class", size_options)
+    if st.session_state.get("size_class_selector") not in size_options:
+        st.session_state.pop("size_class_selector", None)
+    _safe_widget_restore("size_class_selector", size_options, "size_class", "All")
+    size_class = st.selectbox("Size class", size_options, key="size_class_selector")
 
 filtered = df[df["year"] == year].copy()
 if macro_area != "All":
@@ -1583,10 +1651,11 @@ if filtered.empty:
 
 university_options = sorted(filtered["university"].unique())
 st.session_state["_current_university_options"] = university_options
-if (
-    "university_selector" not in st.session_state
-    or st.session_state["university_selector"] not in university_options
-):
+if "university_selector" not in st.session_state:
+    requested_university = _query_param_scalar("university")
+    st.session_state["university_selector"] = requested_university if requested_university in university_options else university_options[0]
+    st.session_state["chart_selection_meta"] = None
+elif st.session_state["university_selector"] not in university_options:
     st.session_state["university_selector"] = university_options[0]
     st.session_state["chart_selection_meta"] = None
 
@@ -1622,7 +1691,24 @@ with main_col:
         unsafe_allow_html=True,
     )
     st.write("")
-    page = st.radio("Dashboard page", pages, horizontal=True, label_visibility="collapsed")
+    requested_page = _query_param_scalar("page")
+    # A focus deep link may reload the Streamlit document. Restore the originating
+    # dashboard page before rendering so the user never falls back to Overview.
+    if current_focus_field() and requested_page in pages:
+        st.session_state["dashboard_page_selector"] = requested_page
+    elif "dashboard_page_selector" not in st.session_state:
+        st.session_state["dashboard_page_selector"] = requested_page if requested_page in pages else pages[0]
+    elif st.session_state["dashboard_page_selector"] not in pages:
+        st.session_state["dashboard_page_selector"] = pages[0]
+
+    page = st.radio(
+        "Dashboard page",
+        pages,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="dashboard_page_selector",
+        on_change=_clear_deep_focus,
+    )
     st.divider()
 
     # Default active context, overwritten by page-specific contexts below.
@@ -2527,7 +2613,12 @@ with ai_col:
     if "ai_auto_cache" not in st.session_state:
         st.session_state.ai_auto_cache = {}
 
-    signature = json.dumps(active_context, ensure_ascii=True, sort_keys=True, default=str)
+    # Evidence deep-link focus is navigation/highlighting, not a new analytical state.
+    # Excluding it prevents the Companion from rewriting the same interpretation just
+    # because the user clicked a number to locate it in the visualization.
+    analysis_context = dict(active_context)
+    analysis_context.pop("evidence_focus", None)
+    signature = json.dumps(analysis_context, ensure_ascii=True, sort_keys=True, default=str)
     context_changed = signature != st.session_state.last_ai_signature
     if context_changed:
         # The visible explanation must always correspond to the current analytical state.
@@ -2604,7 +2695,7 @@ with ai_col:
             st.session_state.ai_answer = cached_answer
         else:
             with st.spinner("Updating interpretation for the current dashboard selection..."):
-                auto_answer = generate_ai_interpretation(active_context, None)
+                auto_answer = cached_auto_interpretation(signature)
             st.session_state.ai_answer = auto_answer
             st.session_state.ai_auto_cache[signature] = auto_answer
             # Keep the in-session cache bounded.
