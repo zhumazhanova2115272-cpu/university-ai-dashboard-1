@@ -10,6 +10,7 @@ from urllib.parse import quote, urlencode
 import altair as alt
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 try:
     from openai import OpenAI
@@ -82,6 +83,15 @@ st.markdown(
     .companion-evidence-link:hover {
         background: rgba(255, 232, 128, 0.45);
         border-radius: 4px;
+    }
+    [id^="source-"] {
+        scroll-margin-top: 90px;
+    }
+    .evidence-scroll-pulse {
+        outline: 2px solid rgba(255, 75, 75, 0.55);
+        outline-offset: 8px;
+        border-radius: 8px;
+        transition: outline-color 0.8s ease;
     }
     </style>
     """,
@@ -1028,6 +1038,70 @@ def render_evidence_registry(evidence_items: list[dict], answer: str = "") -> No
             f"<span class='small-note'>Source: {source} · field: {field}</span></div>",
             unsafe_allow_html=True,
         )
+
+
+
+def scroll_to_evidence_anchor(anchor: str | None) -> None:
+    """After a deep-link rerun, return the browser to the linked dashboard section.
+
+    Streamlit rebuilds the page after query-parameter navigation, so the browser can
+    miss the URL fragment before the target element exists. A tiny client-side helper
+    retries after rendering and scrolls the parent document to the evidence anchor.
+    """
+    if not anchor:
+        return
+
+    anchor_json = json.dumps(str(anchor))
+    components.html(
+        f"""
+        <script>
+        (() => {{
+            const anchorId = {anchor_json};
+            let attempts = 0;
+            const maxAttempts = 24;
+
+            function locateAndScroll() {{
+                attempts += 1;
+                try {{
+                    const doc = window.parent.document;
+                    const el = doc.getElementById(anchorId);
+                    if (el) {{
+                        // Keep the linked chart comfortably in view rather than placing
+                        // the zero-height anchor at the very top edge of the browser.
+                        el.scrollIntoView({{behavior: 'smooth', block: 'center', inline: 'nearest'}});
+
+                        // Briefly pulse the Streamlit block that contains the linked section.
+                        const block = el.closest('[data-testid="stVerticalBlock"]') || el.parentElement;
+                        if (block) {{
+                            block.classList.add('evidence-scroll-pulse');
+                            window.setTimeout(() => block.classList.remove('evidence-scroll-pulse'), 1800);
+                        }}
+                        return true;
+                    }}
+                }} catch (err) {{
+                    // Fallback below handles environments where iframe-parent DOM access
+                    // is temporarily unavailable.
+                }}
+
+                if (attempts < maxAttempts) {{
+                    window.setTimeout(locateAndScroll, 125);
+                }} else {{
+                    try {{ window.parent.location.hash = anchorId; }} catch (err) {{}}
+                }}
+                return false;
+            }}
+
+            // Streamlit/Altair elements are created asynchronously. Multiple scheduled
+            // attempts make the scroll robust even when the chart finishes rendering late.
+            window.setTimeout(locateAndScroll, 40);
+            window.setTimeout(locateAndScroll, 260);
+            window.setTimeout(locateAndScroll, 700);
+        }})();
+        </script>
+        """,
+        height=0,
+        scrolling=False,
+    )
 
 
 def gap_direction(gap: float, threshold: float = 5.0) -> str:
@@ -2590,6 +2664,11 @@ if _focus_field:
     _focused_item = next((item for item in active_context["evidence_items"] if item.get("field") == _focus_field), None)
     if _focused_item:
         active_context["evidence_focus"] = {k: _focused_item.get(k) for k in ["id", "label", "value", "display_value", "source", "field", "anchor"]}
+
+# A deep-link click causes a Streamlit rerun. Once the selected page and visual are
+# rebuilt, immediately return the browser to the corresponding evidence section.
+if active_context.get("evidence_focus"):
+    scroll_to_evidence_anchor(active_context["evidence_focus"].get("anchor"))
 
 with ai_col:
     st.subheader("AI Analysis Companion")
