@@ -19,6 +19,7 @@ except ImportError:
 
 DATA_PATH = Path("data/university_dashboard_with_dea_efficiency.xlsx")
 SHEET_NAME = "Dashboard_Data_with_DEA"
+COMPANION_LOGIC_VERSION = "v19.1-audited"
 
 SCORE_COMPONENTS = {
     "Teaching": [
@@ -519,14 +520,15 @@ def render_insight_flags(flags: list[str]) -> None:
 
 
 def request_visual_explanation(source_page: str, label: str, field: str, key: str) -> None:
-    if st.button("✦ Explain this visual", key=key, help="Ask the Analysis Companion to prioritize this visualization in its next interpretation."):
+    if st.button("✦ Explain this visual", key=key, help="Ask the Analysis Companion to explain the visible pattern in this chart using the current dashboard values."):
         _clear_deep_focus()
         st.session_state["chart_focus_meta"] = {
             "source_page": source_page,
             "interaction": "explain visual request",
+            "focus_kind": "visual",
             "field": field,
             "label": label,
-            "value": "current visual",
+            "value": None,
         }
         st.session_state["ai_answer"] = ""
         st.session_state["last_ai_signature"] = ""
@@ -632,8 +634,19 @@ def selected_context(row: pd.Series, view_type: str = "University Profile") -> d
 
 
 def make_overview_context(filtered: pd.DataFrame, year: int, macro_area: str, region: str, size_class: str) -> dict:
-    top = filtered.sort_values("overall_score", ascending=False).head(3)
+    top = filtered.sort_values("overall_score", ascending=False).head(10)
     bottom = filtered.sort_values("overall_score", ascending=True).head(3)
+    macro_profiles = (
+        filtered.groupby("macro_area", as_index=False)[["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"]]
+        .mean()
+        .sort_values("overall_score", ascending=False)
+    )
+    corr = None
+    try:
+        corr = clean_value(filtered[["teaching_score", "research_score"]].corr().iloc[0, 1])
+    except Exception:
+        pass
+    overall_series = numeric_series(filtered, "overall_score")
     return {
         "view_type": "Overview",
         "year": int(year),
@@ -642,6 +655,8 @@ def make_overview_context(filtered: pd.DataFrame, year: int, macro_area: str, re
         "size_class_filter": size_class,
         "number_of_universities": int(filtered["university"].nunique()),
         "average_overall_score": clean_value(filtered["overall_score"].mean()),
+        "median_overall_score": clean_value(overall_series.median()) if not overall_series.empty else None,
+        "std_overall_score": clean_value(overall_series.std()) if len(overall_series) > 1 else None,
         "average_teaching_score": clean_value(filtered["teaching_score"].mean()),
         "average_placement_score": clean_value(filtered["placement_score"].mean()),
         "average_research_score": clean_value(filtered["research_score"].mean()),
@@ -658,8 +673,15 @@ def make_overview_context(filtered: pd.DataFrame, year: int, macro_area: str, re
             filtered["financial_score"].mean(),
         )),
         "average_dea_vrs_efficiency": clean_value(filtered["dea_vrs_efficiency_100"].mean()) if "dea_vrs_efficiency_100" in filtered.columns else None,
-        "top_universities": top[["university", "overall_score", "overall_rank_year"]].to_dict("records"),
+        "top_universities": top.head(3)[["university", "overall_score", "overall_rank_year"]].to_dict("records"),
+        "top_10_universities": top[["university", "overall_score", "overall_rank_year"]].to_dict("records"),
         "lowest_universities": bottom[["university", "overall_score", "overall_rank_year"]].to_dict("records"),
+        "macro_area_profiles": macro_profiles.to_dict("records"),
+        "teaching_research_correlation": corr,
+        "teaching_min": clean_value(filtered["teaching_score"].min()),
+        "teaching_max": clean_value(filtered["teaching_score"].max()),
+        "research_min": clean_value(filtered["research_score"].min()),
+        "research_max": clean_value(filtered["research_score"].max()),
     }
 
 
@@ -1080,6 +1102,9 @@ def build_evidence_items(context: dict) -> list[dict]:
         add("DEA-CRS efficiency", context.get("dea_crs_efficiency_100"), "DEA summary", "dea_crs_efficiency_100", "source-dea-summary", 1)
         add("Scale efficiency", context.get("dea_scale_efficiency_100"), "DEA summary", "dea_scale_efficiency_100", "source-dea-summary", 1)
         add("Overall score", context.get("overall_score"), "DEA vs performance context", "overall_score", "source-dea-summary", 1)
+        add(context.get("dea_scatter_x_axis", "DEA scatterplot x-axis value"), context.get("dea_scatter_x_value"), "DEA scatterplot", "dea_scatter_x_value", "source-dea-scatter", 2)
+        add("DEA x-axis median in current filter", context.get("dea_scatter_x_median_current_filter"), "DEA scatterplot benchmark", "dea_scatter_x_median_current_filter", "source-dea-scatter", 2)
+        add("DEA x-axis percentile in current filter", context.get("dea_scatter_x_percentile_current_filter"), "DEA scatterplot position", "dea_scatter_x_percentile_current_filter", "source-dea-scatter", 0, "th percentile")
         add("DEA-VRS percentile in current filter", context.get("dea_vrs_efficiency_100_percentile_current_filter"), "DEA current-filter position", "dea_vrs_efficiency_100_percentile_current_filter", "source-dea-scatter", 0, "th percentile")
         add("Efficiency category", context.get("efficiency_category"), "DEA summary", "efficiency_category", "source-dea-summary")
 
@@ -1460,6 +1485,29 @@ def local_overview_interpretation(context: dict, user_question: str | None = Non
     weakest = min(dims, key=dims.get)
     spread = max(dims.values()) - min(dims.values())
     q = f"\n\n**User question**\n\n{user_question}" if user_question else ""
+    brush = context.get("linked_brush") or {}
+    if brush:
+        selected_n = brush.get("selected_universities")
+        b_overall = _safe_float(brush.get("average_overall_score"))
+        b_teaching = _safe_float(brush.get("average_teaching_score"))
+        b_research = _safe_float(brush.get("average_research_score"))
+        return f"""
+**Overview analysis — brushed subgroup**
+
+The current brush selects **{selected_n} universities** from the **{context.get('number_of_universities')}** universities in the filtered system. Their mean Overall score is **{format_number(b_overall,1)}**, compared with **{avg_overall:.1f}** for the full filtered group. Their mean Teaching and Research scores are **{format_number(b_teaching,1)}** and **{format_number(b_research,1)}**, versus **{avg_teaching:.1f}** and **{avg_research:.1f}** in the full group.
+
+**Interpretation**
+
+The brush defines a temporary analytical subgroup. If its Teaching and Research means are both above the full-group averages, it represents a jointly stronger academic cluster; if only one is above, the selected region of the scatterplot reflects specialization rather than uniformly stronger performance.
+
+**What to inspect next**
+
+Move the brush to another region and compare how the linked multidimensional profile changes. This is useful for testing whether the visible pattern is specific to one cluster of universities.
+
+**Limit**
+
+The brushed subgroup is user-defined and exploratory; it is not a statistically estimated cluster.{q}
+"""
     return f"""
 **Overview analysis**
 
@@ -1499,6 +1547,24 @@ def local_profile_interpretation(context: dict, user_question: str | None = None
     macro_gap = overall - macro
     spread = max(dims.values()) - min(dims.values())
     q = f"\n\n**User question**\n\n{user_question}\n\nThe answer should use only the University Profile indicators and benchmark bars." if user_question else ""
+    dynamic_benchmark = context.get("dynamic_benchmark") or {}
+    if dynamic_benchmark:
+        selected_dims = {"Overall": overall, "Teaching": teaching, "Placement": placement, "Research": research, "Financial": financial}
+        benchmark_dims = {
+            "Overall": dynamic_benchmark.get("overall_average"), "Teaching": dynamic_benchmark.get("teaching_average"),
+            "Placement": dynamic_benchmark.get("placement_average"), "Research": dynamic_benchmark.get("research_average"),
+            "Financial": dynamic_benchmark.get("financial_average"),
+        }
+        gaps = {k: _metric_change(benchmark_dims.get(k), selected_dims.get(k)) for k in selected_dims}
+        valid_gaps = {k:v for k,v in gaps.items() if _safe_float(v) is not None}
+        largest_gap_dim = max(valid_gaps, key=lambda k: abs(float(valid_gaps[k]))) if valid_gaps else None
+        benchmark_sentence = (
+            f"Against **{dynamic_benchmark.get('label')}** ({dynamic_benchmark.get('n')} universities), the largest selected-minus-benchmark gap is "
+            f"**{largest_gap_dim} {_fmt_signed(valid_gaps.get(largest_gap_dim))} points**."
+            if largest_gap_dim else "The selected benchmark does not contain enough comparable data."
+        )
+    else:
+        benchmark_sentence = f"Relative to the national average, the overall gap is **{national_gap:+.1f} points**; relative to the macro-area average, it is **{macro_gap:+.1f} points**."
     return f"""
 **University Profile analysis**
 
@@ -1506,7 +1572,7 @@ def local_profile_interpretation(context: dict, user_question: str | None = None
 
 **Benchmark interpretation**
 
-Compared with the national average, the university is **{gap_direction(national_gap)}** the benchmark by **{abs(national_gap):.1f} points**. Compared with the macro-area average, it is **{gap_direction(macro_gap)}** the benchmark by **{abs(macro_gap):.1f} points**. This means the selected university is not only being evaluated in isolation: its profile is being read against both the national system and its territorial context.
+{benchmark_sentence} This means the selected university is being read relative to an explicit contextual reference group rather than in isolation.
 
 **Profile shape**
 
@@ -1868,6 +1934,212 @@ DEA results depend on the selected inputs and outputs. The score is a descriptiv
 """
 
 
+def _visual_id_from_focus(focus: dict) -> str:
+    field = str(focus.get("field") or "")
+    return field.split("visual::", 1)[1] if field.startswith("visual::") else field
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _metric_change(start: Any, end: Any) -> float | None:
+    a, b = _safe_float(start), _safe_float(end)
+    return None if a is None or b is None else b - a
+
+
+def build_visual_focus_details(context: dict, focus: dict) -> dict:
+    """Build data-rich context for every 'Explain this visual' button.
+
+    This is intentionally deterministic: even if the external model is unavailable,
+    the local Companion can explain the actual chart rather than merely acknowledge
+    that the chart was selected.
+    """
+    visual_id = _visual_id_from_focus(focus)
+    view = context.get("view_type")
+    details: dict[str, Any] = {
+        "mode": "visual",
+        "focus_kind": "visual",
+        "visual_id": visual_id,
+        "view_type": view,
+        "label": focus.get("label") or visual_id,
+        "interaction": focus.get("interaction"),
+    }
+
+    # Overview visuals
+    if visual_id == "overview_top10":
+        rows = context.get("top_10_universities") or context.get("top_universities") or []
+        details["ranking_rows"] = rows
+        if rows:
+            details["leader"] = rows[0]
+            details["last_visible"] = rows[-1]
+            details["visible_range"] = _metric_change(rows[-1].get("overall_score"), rows[0].get("overall_score"))
+    elif visual_id == "overview_average_profile":
+        profile = {
+            "Teaching": context.get("average_teaching_score"),
+            "Placement": context.get("average_placement_score"),
+            "Research": context.get("average_research_score"),
+            "Financial": context.get("average_financial_score"),
+        }
+        details["profile"] = profile
+        valid = {k: _safe_float(v) for k, v in profile.items() if _safe_float(v) is not None}
+        if valid:
+            details["strongest_dimension"] = max(valid, key=valid.get)
+            details["weakest_dimension"] = min(valid, key=valid.get)
+            details["spread"] = max(valid.values()) - min(valid.values())
+        details["overall_average"] = context.get("average_overall_score")
+    elif visual_id == "overview_macro_area":
+        rows = context.get("macro_area_profiles") or []
+        details["macro_area_profiles"] = rows
+        if rows:
+            details["highest_overall_macro_area"] = max(rows, key=lambda r: _safe_float(r.get("overall_score")) or -1e9)
+            details["lowest_overall_macro_area"] = min(rows, key=lambda r: _safe_float(r.get("overall_score")) or 1e9)
+    elif visual_id == "overview_linked_brush":
+        details["linked_brush"] = context.get("linked_brush")
+        details["number_of_universities"] = context.get("number_of_universities")
+        details["full_average_overall"] = context.get("average_overall_score")
+        details["full_average_teaching"] = context.get("average_teaching_score")
+        details["full_average_research"] = context.get("average_research_score")
+        details["teaching_research_correlation"] = context.get("teaching_research_correlation")
+        details["teaching_range"] = [context.get("teaching_min"), context.get("teaching_max")]
+        details["research_range"] = [context.get("research_min"), context.get("research_max")]
+
+    # University Profile visuals
+    elif visual_id == "profile_dimensions":
+        profile = {k: context.get(v) for k, v in {
+            "Teaching": "teaching_score", "Placement": "placement_score", "Research": "research_score", "Financial": "financial_score"
+        }.items()}
+        details.update({"university": context.get("university"), "overall_score": context.get("overall_score"), "profile": profile,
+                        "profile_dispersion": context.get("profile_dispersion"), "profile_type": context.get("profile_type")})
+        valid = {k: _safe_float(v) for k, v in profile.items() if _safe_float(v) is not None}
+        if valid:
+            details["strongest_dimension"] = max(valid, key=valid.get)
+            details["weakest_dimension"] = min(valid, key=valid.get)
+            details["spread"] = max(valid.values()) - min(valid.values())
+    elif visual_id == "profile_benchmark":
+        bench = context.get("dynamic_benchmark") or {}
+        details.update({"university": context.get("university"), "benchmark": bench, "selected_scores": {
+            "Overall": context.get("overall_score"), "Teaching": context.get("teaching_score"), "Placement": context.get("placement_score"),
+            "Research": context.get("research_score"), "Financial": context.get("financial_score")}})
+        if bench:
+            details["gaps_selected_minus_benchmark"] = {
+                "Overall": _metric_change(bench.get("overall_average"), context.get("overall_score")),
+                "Teaching": _metric_change(bench.get("teaching_average"), context.get("teaching_score")),
+                "Placement": _metric_change(bench.get("placement_average"), context.get("placement_score")),
+                "Research": _metric_change(bench.get("research_average"), context.get("research_score")),
+                "Financial": _metric_change(bench.get("financial_average"), context.get("financial_score")),
+            }
+    elif visual_id.endswith("_breakdown"):
+        details.update({"university": context.get("university"), "score_breakdown": context.get("score_breakdown") or {}})
+    elif visual_id == "weight_sensitivity":
+        rows = context.get("weight_sensitivity") or []
+        details.update({"university": context.get("university"), "scenarios": rows})
+        if rows:
+            valid = [r for r in rows if _safe_float(r.get("Score")) is not None]
+            if valid:
+                details["highest_score_scenario"] = max(valid, key=lambda r: float(r.get("Score")))
+                details["lowest_score_scenario"] = min(valid, key=lambda r: float(r.get("Score")))
+                valid_rank = [r for r in valid if _safe_float(r.get("Rank")) is not None]
+                if valid_rank:
+                    details["best_rank_scenario"] = min(valid_rank, key=lambda r: float(r.get("Rank")))
+                    details["worst_rank_scenario"] = max(valid_rank, key=lambda r: float(r.get("Rank")))
+    elif visual_id == "profile_trend":
+        details.update({"university": context.get("university"), "trend_summary": context.get("profile_trend_summary") or {}})
+
+    # Comparison visuals
+    elif visual_id in {"comparison_scores", "comparison_gaps"}:
+        a, b = context.get("university_a") or {}, context.get("university_b") or {}
+        gaps = context.get("score_gaps_a_minus_b") or {}
+        details.update({"university_a": a, "university_b": b, "gaps": gaps})
+        gap_pairs = {
+            "Overall": gaps.get("overall_gap_a_minus_b"), "Teaching": gaps.get("teaching_gap_a_minus_b"),
+            "Placement": gaps.get("placement_gap_a_minus_b"), "Research": gaps.get("research_gap_a_minus_b"),
+            "Financial": gaps.get("financial_gap_a_minus_b")}
+        valid = {k: _safe_float(v) for k, v in gap_pairs.items() if _safe_float(v) is not None}
+        if valid:
+            details["largest_gap_dimension"] = max(valid, key=lambda k: abs(valid[k]))
+            details["largest_gap"] = valid[details["largest_gap_dimension"]]
+    elif visual_id == "comparison_benchmark":
+        details.update({"selected_vs_benchmark": context.get("selected_vs_benchmark") or {}})
+
+    # Finance visuals
+    elif visual_id == "finance_scatter":
+        details.update({
+            "university": context.get("university"), "x_label": context.get("finance_x_axis"), "y_label": context.get("score_y_axis"),
+            "x_value": context.get("selected_x_value"), "y_value": context.get("selected_y_value"),
+            "x_median": context.get("x_axis_median_current_filter"), "y_median": context.get("y_axis_median_current_filter"),
+            "x_percentile": context.get("x_axis_percentile_current_filter"), "y_percentile": context.get("y_axis_percentile_current_filter"),
+            "cluster_position": context.get("scatter_cluster_position"),
+        })
+    elif visual_id == "finance_structure":
+        details.update({"university": context.get("university"), "financial_score": context.get("financial_score"), "overall_score": context.get("overall_score"),
+                        "indicators": {"Personnel cost share": context.get("personnel_cost_share"), "Public revenue share": context.get("public_revenue_share"),
+                                       "Student contribution share": context.get("student_contribution_share"), "Performance quota share": context.get("performance_quota_share"),
+                                       "Economic-financial sustainability index": context.get("economic_financial_sustainability_index")}})
+
+    # DEA visuals
+    elif visual_id == "dea_scatter":
+        details.update({
+            "university": context.get("university"), "x_label": context.get("dea_scatter_x_axis"), "x_value": context.get("dea_scatter_x_value"),
+            "x_median": context.get("dea_scatter_x_median_current_filter"), "x_percentile": context.get("dea_scatter_x_percentile_current_filter"),
+            "vrs": context.get("dea_vrs_efficiency_100"), "vrs_median": context.get("dea_vrs_efficiency_100_median_current_filter"),
+            "vrs_percentile": context.get("dea_vrs_efficiency_100_percentile_current_filter"), "category": context.get("efficiency_category"),
+            "overall_score": context.get("overall_score"),
+        })
+    elif visual_id == "dea_trend":
+        details.update({"university": context.get("university"), "trend_summary": context.get("dea_trend_summary") or {}})
+    elif visual_id == "dea_top10":
+        rows = context.get("dea_top10") or []
+        details.update({"rows": rows, "selected_university": context.get("university"), "selected_vrs": context.get("dea_vrs_efficiency_100"),
+                        "selected_rank": context.get("dea_vrs_rank_year")})
+
+    # Ranking visual
+    elif visual_id == "ranking_chart":
+        details.update({"metric": context.get("metric"), "selected_university": context.get("selected_university"), "selected_value": context.get("selected_value"),
+                        "rank": context.get("selected_rank_in_current_filter"), "n": context.get("number_of_universities"),
+                        "percentile": context.get("selected_percentile_current_filter"), "top_universities": context.get("top_universities") or []})
+
+    # Time visuals
+    elif visual_id in {"time_change", "time_slope"}:
+        details.update({"university": context.get("university"), "start_year": context.get("start_year"), "end_year": context.get("end_year"),
+                        "start_values": context.get("start_values") or {}, "end_values": context.get("end_values") or {},
+                        "changes": context.get("changes_end_minus_start") or {}, "largest_change_dimension": context.get("largest_change_dimension")})
+
+    # Teaching & research visuals
+    elif visual_id == "teaching_research_scores":
+        profile = {"Teaching": context.get("teaching_score"), "Placement": context.get("placement_score"), "Research": context.get("research_score")}
+        details.update({"university": context.get("university"), "profile": profile})
+        valid = {k: _safe_float(v) for k, v in profile.items() if _safe_float(v) is not None}
+        if valid:
+            details["strongest_dimension"] = max(valid, key=valid.get)
+            details["weakest_dimension"] = min(valid, key=valid.get)
+    elif visual_id == "teaching_indicators":
+        details.update({"university": context.get("university"), "teaching_score": context.get("teaching_score"), "placement_score": context.get("placement_score"),
+                        "indicators": {"Second-year retention": context.get("second_year_retention_pct"), "Inactive students reversed score": context.get("inactive_students_reversed_score"),
+                                       "Graduation within standard duration": context.get("graduation_within_standard_pct"), "Graduation intensity": context.get("graduation_intensity"),
+                                       "Employment index": context.get("employment_index")},
+                        "percentiles": {"Retention": context.get("second_year_retention_pct_percentile_current_filter"),
+                                        "Graduation": context.get("graduation_within_standard_pct_percentile_current_filter"),
+                                        "Employment": context.get("employment_index_percentile_current_filter")}})
+    elif visual_id == "research_indicators":
+        details.update({"university": context.get("university"), "research_score": context.get("research_score"),
+                        "indicators": {"Publications per teaching staff": context.get("publications_per_teaching_staff"), "Citations per publication": context.get("citations_per_publication"),
+                                       "H-index": context.get("h_index"), "Highly cited researchers": context.get("highly_cited_researchers"), "Nature and Science articles": context.get("nature_science_articles")},
+                        "percentiles": {"Publications/staff": context.get("publications_per_teaching_staff_percentile_current_filter"),
+                                        "Citations/publication": context.get("citations_per_publication_percentile_current_filter"), "H-index": context.get("h_index_percentile_current_filter")}})
+    elif visual_id == "teaching_research_scatter":
+        details.update({"university": context.get("university"), "teaching_score": context.get("teaching_score"), "research_score": context.get("research_score"),
+                        "teaching_percentile": context.get("teaching_score_percentile_current_filter"), "research_percentile": context.get("research_score_percentile_current_filter"),
+                        "position": context.get("teaching_research_position")})
+
+    return details
+
+
 def build_focus_details(context: dict) -> dict | None:
     """Create a compact, page-specific description of the clicked visual mark.
 
@@ -1882,6 +2154,10 @@ def build_focus_details(context: dict) -> dict | None:
     label = str(focus.get("label") or field)
     value = focus.get("value")
     view = context.get("view_type")
+
+    if focus.get("focus_kind") == "visual" or field.startswith("visual::") or focus.get("interaction") == "explain visual request":
+        return build_visual_focus_details(context, focus)
+
     details: dict[str, Any] = {
         "mode": "clicked_mark",
         "view_type": view,
@@ -2000,9 +2276,481 @@ def build_focus_details(context: dict) -> dict | None:
     return details
 
 
+def _fmt_signed(value: Any, decimals: int = 1) -> str:
+    v = _safe_float(value)
+    return "n/a" if v is None else f"{v:+.{decimals}f}"
+
+
+def _compact_pairs(mapping: dict, decimals: int = 1) -> str:
+    parts = []
+    for key, value in mapping.items():
+        v = _safe_float(value)
+        if v is not None:
+            parts.append(f"**{key} {v:.{decimals}f}**")
+    return ", ".join(parts)
+
+
+def local_visual_interpretation(context: dict, user_question: str | None = None) -> str:
+    """Explain the actual pattern in the visual selected by 'Explain this visual'."""
+    focus = context.get("focus_details") or build_focus_details(context) or {}
+    vid = focus.get("visual_id")
+    label = focus.get("label") or "selected visual"
+    q = f"\n\n**User question**\n\n{user_question}" if user_question else ""
+
+    if vid == "overview_top10":
+        rows = focus.get("ranking_rows") or []
+        if rows:
+            leader = rows[0]
+            tail = rows[-1]
+            gap = (_safe_float(leader.get("overall_score")) or 0) - (_safe_float(tail.get("overall_score")) or 0)
+            top3 = ", ".join(f"{r.get('university')} ({format_number(r.get('overall_score'),1)})" for r in rows[:3])
+            return f"""**Visual analysis — {label}**
+
+The visible leaders are **{top3}**. The first university, **{leader.get('university')}**, has an overall score of **{format_number(leader.get('overall_score'),1)}**, while the last university shown in this Top-{len(rows)} view has **{format_number(tail.get('overall_score'),1)}**. The visible spread is therefore about **{gap:.1f} points**.
+
+**Interpretation**
+
+This chart is useful for locating the upper end of the current filtered distribution, but it should not be read as a complete quality hierarchy. The overall score aggregates Teaching, Placement, Research and Financial dimensions, so similar bar lengths can conceal very different profiles.
+
+**What to inspect next**
+
+Click one of the bars and open its University Profile to see which dimensions produce the position shown here.
+
+**Limit**
+
+The ranking is specific to the selected year and filters and uses the dashboard's normalized overall score.{q}"""
+
+    if vid == "overview_average_profile":
+        profile = focus.get("profile") or {}
+        return f"""**Visual analysis — {label}**
+
+The current filtered group has the following average profile: {_compact_pairs(profile)}. The strongest average dimension is **{focus.get('strongest_dimension')}**, while the weakest is **{focus.get('weakest_dimension')}**. Their difference is **{format_number(focus.get('spread'),1)} points**; the average overall score is **{format_number(focus.get('overall_average'),1)}**.
+
+**Interpretation**
+
+The chart shows the internal shape of the filtered system, not just its average overall level. A visible spread means that the institutions in the current selection collectively perform more strongly in some dimensions than others, so the overall average alone would hide that structure.
+
+**What to inspect next**
+
+Use the macro-area chart or Linked Brushing Explorer to check whether the same strong/weak pattern is shared across geographical groups or is driven by a subset of universities.
+
+**Limit**
+
+These are group averages and can hide substantial institution-level heterogeneity.{q}"""
+
+    if vid == "overview_macro_area":
+        high, low = focus.get("highest_overall_macro_area") or {}, focus.get("lowest_overall_macro_area") or {}
+        rows = focus.get("macro_area_profiles") or []
+        profile_text = "; ".join(f"{r.get('macro_area')}: overall {format_number(r.get('overall_score'),1)}" for r in rows)
+        return f"""**Visual analysis — {label}**
+
+Across the macro-areas shown, the highest average overall score is **{high.get('macro_area')} ({format_number(high.get('overall_score'),1)})**, while the lowest is **{low.get('macro_area')} ({format_number(low.get('overall_score'),1)})**. The current overall averages are: {profile_text}.
+
+**Interpretation**
+
+The grouped bars show that geographical averages are multidimensional: a macro-area can lead in one score and not in another. The useful reading is therefore the profile composition within each macro-area, rather than a single geographical ranking.
+
+**What to inspect next**
+
+Apply one macro-area as a filter and compare individual universities inside it; this separates between-area differences from institutional heterogeneity within the area.
+
+**Limit**
+
+These are descriptive averages and do not establish territorial causes of performance differences.{q}"""
+
+    if vid == "overview_linked_brush":
+        brush = focus.get("linked_brush") or {}
+        if brush:
+            return f"""**Visual analysis — {label}**
+
+The current brush selects **{brush.get('selected_universities')} universities**. Their mean Teaching score is **{format_number(brush.get('average_teaching_score'),1)}**, mean Research score is **{format_number(brush.get('average_research_score'),1)}**, and mean Overall score is **{format_number(brush.get('average_overall_score'),1)}**. For the full filtered group, the corresponding averages are Teaching **{format_number(focus.get('full_average_teaching'),1)}**, Research **{format_number(focus.get('full_average_research'),1)}**, and Overall **{format_number(focus.get('full_average_overall'),1)}**.
+
+**Interpretation**
+
+The brush is doing more than highlighting points: it defines a temporary analytical subgroup. Comparing the brushed means with the full-sample means shows whether the selected cluster represents a relatively teaching-strong, research-strong, jointly strong, or weaker profile.
+
+**What to inspect next**
+
+Move the brush to a different part of the scatterplot and compare how the linked multidimensional profile changes.
+
+**Limit**
+
+The brushed group is user-defined and exploratory; it is not a statistically estimated cluster.{q}"""
+        return f"""**Visual analysis — {label}**
+
+This scatterplot positions **{focus.get('number_of_universities')} universities** by Teaching and Research. Teaching ranges from **{format_number((focus.get('teaching_range') or [None,None])[0],1)}** to **{format_number((focus.get('teaching_range') or [None,None])[1],1)}**, while Research ranges from **{format_number((focus.get('research_range') or [None,None])[0],1)}** to **{format_number((focus.get('research_range') or [None,None])[1],1)}**. The descriptive Teaching–Research correlation is **{format_number(focus.get('teaching_research_correlation'),2)}**.
+
+**Interpretation**
+
+The purpose of the visual is to expose joint positioning and heterogeneity. Dragging a rectangle creates a temporary subgroup whose linked profile can then be compared with the whole filtered system.
+
+**What to inspect next**
+
+Brush a dense central region and then an extreme region to see how their average multidimensional profiles differ.
+
+**Limit**
+
+The correlation and spatial pattern are descriptive and do not imply a causal relationship between Teaching and Research.{q}"""
+
+    if vid == "profile_dimensions":
+        profile = focus.get("profile") or {}
+        return f"""**Visual analysis — {label}**
+
+For **{focus.get('university')}**, the profile is {_compact_pairs(profile)} with an Overall score of **{format_number(focus.get('overall_score'),1)}**. The strongest dimension is **{focus.get('strongest_dimension')}** and the weakest is **{focus.get('weakest_dimension')}**, separated by **{format_number(focus.get('spread'),1)} points**. The profile dispersion is **{format_number(focus.get('profile_dispersion'),1)}**.
+
+**Interpretation**
+
+This is the core multidimensional view: it shows whether the overall score is supported evenly across dimensions or produced by specialization. A large spread means that the single overall value masks meaningful internal differences.
+
+**What to inspect next**
+
+Click the strongest or weakest bar, or open **Why this score?**, to trace the composite dimension back to its component indicators.
+
+**Limit**
+
+The bars are normalized dashboard scores and should not be interpreted as official external ratings.{q}"""
+
+    if vid == "profile_benchmark":
+        bench = focus.get("benchmark") or {}
+        gaps = focus.get("gaps_selected_minus_benchmark") or {}
+        valid = {k:v for k,v in gaps.items() if _safe_float(v) is not None}
+        largest = max(valid, key=lambda k: abs(float(valid[k]))) if valid else None
+        return f"""**Visual analysis — {label}**
+
+The selected university is compared with **{bench.get('label')}** (**{bench.get('n')} universities**). The selected-minus-benchmark gaps are {_compact_pairs(valid)}. The largest absolute difference is in **{largest}** at **{_fmt_signed(valid.get(largest))} points**.
+
+**Interpretation**
+
+This chart changes the meaning of comparison by changing the reference group. A positive gap means the selected university is above the chosen benchmark average in that dimension; a negative gap means it is below. The most important information is not only the direction of the overall gap but whether the same pattern persists across dimensions.
+
+**What to inspect next**
+
+Switch from National to Same size or Region. If the gaps change materially, institutional context is affecting the descriptive benchmark position.
+
+**Limit**
+
+Benchmark results depend on the peer definition and should not be treated as causal or normative judgments.{q}"""
+
+    if vid and vid.endswith("_breakdown"):
+        bd = focus.get("score_breakdown") or {}
+        comps = bd.get("components") or []
+        valid = [r for r in comps if _safe_float(r.get("Component score")) is not None]
+        strongest = max(valid, key=lambda r: float(r.get("Component score"))) if valid else {}
+        weakest = min(valid, key=lambda r: float(r.get("Component score"))) if valid else {}
+        return f"""**Visual analysis — {label}**
+
+The reported **{bd.get('dimension')} score is {format_number(bd.get('reported_score'),1)}**, and reconstruction from the displayed components gives **{format_number(bd.get('reconstructed_score'),1)}**. The strongest component is **{strongest.get('Component')} ({format_number(strongest.get('Component score'),1)})**, while the weakest is **{weakest.get('Component')} ({format_number(weakest.get('Component score'),1)})**.
+
+**Interpretation**
+
+The breakdown explains *why* the composite score has its current level. It separates the contribution of the underlying normalized indicators from the final dimension score, making the aggregation transparent rather than treating the score as a black box.
+
+**What to inspect next**
+
+Compare the weakest component's raw value and normalization method with the stronger components; this shows whether the limitation comes from the observed indicator level or from the way its scale is transformed.
+
+**Limit**
+
+Component contributions reflect the dashboard's specified normalization and equal-within-dimension aggregation rules.{q}"""
+
+    if vid == "weight_sensitivity":
+        high, low = focus.get("highest_score_scenario") or {}, focus.get("lowest_score_scenario") or {}
+        best, worst = focus.get("best_rank_scenario") or {}, focus.get("worst_rank_scenario") or {}
+        return f"""**Visual analysis — {label}**
+
+Across the predefined weighting scenarios, the profile score ranges from **{format_number(low.get('Score'),1)}** under **{low.get('Scenario')}** to **{format_number(high.get('Score'),1)}** under **{high.get('Scenario')}**. The best observed rank is **{best.get('Rank')}** under **{best.get('Scenario')}**, while the weakest rank is **{worst.get('Rank')}** under **{worst.get('Scenario')}**.
+
+**Interpretation**
+
+This chart is a robustness check. If score and rank change little across scenarios, the university's relative profile is fairly stable to weighting choices. Larger movements indicate that the aggregate position depends more strongly on which dimension receives priority.
+
+**What to inspect next**
+
+Compare the scenario that improves the rank most with the university's strongest dimension; that reveals which weighting assumption is driving the sensitivity.
+
+**Limit**
+
+These are predefined exploratory scenarios, not alternative official rankings.{q}"""
+
+    if vid == "profile_trend":
+        ts = focus.get("trend_summary") or {}
+        changes = ts.get("changes") or {}
+        largest = ts.get("largest_change_dimension")
+        return f"""**Visual analysis — {label}**
+
+For **{focus.get('university')}**, this chart tracks the score profile from **{ts.get('start_year')}** to **{ts.get('end_year')}**. The Overall score changes by **{_fmt_signed(changes.get('overall_score'))} points**. The largest dimension movement is **{str(largest).replace('_score','').title() if largest else 'n/a'}**, changing by **{_fmt_signed(changes.get(largest))} points**.
+
+**Interpretation**
+
+The line chart separates overall stability from internal restructuring. A nearly flat Overall line can coexist with sizable movements in individual dimensions, meaning that gains in one area may offset declines in another.
+
+**What to inspect next**
+
+Use Time Dynamics / What Changed to compare the exact start and end values of the dimension with the largest movement.
+
+**Limit**
+
+The chart describes temporal change but does not identify its causes.{q}"""
+
+    if vid in {"comparison_scores", "comparison_gaps"}:
+        a, b, gaps = focus.get("university_a") or {}, focus.get("university_b") or {}, focus.get("gaps") or {}
+        dim = focus.get("largest_gap_dimension")
+        gap = focus.get("largest_gap")
+        return f"""**Visual analysis — {label}**
+
+The two universities differ most in **{dim}**, where the A-minus-B gap is **{_fmt_signed(gap)} points**. Their Overall scores are **{a.get('university')}: {format_number(a.get('overall_score'),1)}** and **{b.get('university')}: {format_number(b.get('overall_score'),1)}**. The full dimension gaps are Overall **{_fmt_signed(gaps.get('overall_gap_a_minus_b'))}**, Teaching **{_fmt_signed(gaps.get('teaching_gap_a_minus_b'))}**, Placement **{_fmt_signed(gaps.get('placement_gap_a_minus_b'))}**, Research **{_fmt_signed(gaps.get('research_gap_a_minus_b'))}**, Financial **{_fmt_signed(gaps.get('financial_gap_a_minus_b'))}**.
+
+**Interpretation**
+
+The chart shows whether the overall difference is broad or concentrated. If one dimension gap is much larger than the others, that dimension is the main descriptive separator; opposing positive and negative gaps indicate different specialization profiles rather than uniform dominance.
+
+**What to inspect next**
+
+Click the largest gap bar to switch from whole-chart interpretation to a focused dimension comparison.
+
+**Limit**
+
+These differences are descriptive and do not explain why the universities differ.{q}"""
+
+    if vid == "comparison_benchmark":
+        cmp = focus.get("selected_vs_benchmark") or {}
+        gaps = cmp.get("dimension_gaps_selected_minus_benchmark") or {}
+        valid = {str(k).replace('_score','').title():v for k,v in gaps.items() if _safe_float(v) is not None}
+        largest = max(valid, key=lambda k: abs(float(valid[k]))) if valid else None
+        return f"""**Visual analysis — {label}**
+
+The active university **{cmp.get('selected_university')}** is compared with **{cmp.get('benchmark')}** (**{cmp.get('benchmark_n')} universities**). The dimension gaps are {_compact_pairs(valid)}. The largest departure from the benchmark is **{largest} ({_fmt_signed(valid.get(largest))} points)**.
+
+**Interpretation**
+
+This view answers a different question from A-vs-B comparison: it asks how the active university sits relative to a contextual peer average. The sign and size of each gap show where the profile is distinctive within that benchmark group.
+
+**What to inspect next**
+
+Change the benchmark definition and check whether the largest gap remains the same. Stability across peer definitions strengthens the descriptive pattern.
+
+**Limit**
+
+The result is conditional on the selected benchmark group.{q}"""
+
+    if vid == "finance_scatter":
+        xv, yv, xm, ym = focus.get("x_value"), focus.get("y_value"), focus.get("x_median"), focus.get("y_median")
+        return f"""**Visual analysis — {label}**
+
+**{focus.get('university')}** is plotted at **{focus.get('x_label')} = {format_number(xv,2)}** and **{focus.get('y_label')} = {format_number(yv,1)}**. In the current filtered group, the medians are **{format_number(xm,2)}** and **{format_number(ym,1)}**, respectively. The selected university is around the **{format_number(focus.get('x_percentile'),0)}th percentile** on the x-axis and **{format_number(focus.get('y_percentile'),0)}th percentile** on the y-axis, placing it **{focus.get('cluster_position')}**.
+
+**Interpretation**
+
+This visual should be read as a joint position, not as a causal relationship. The key question is whether the selected university combines an unusually high/low financial condition with an unusually high/low performance score compared with the current peers.
+
+**What to inspect next**
+
+Change either axis while keeping the same university selected. If the university remains unusual across several financial indicators, the pattern is more persistent than a single scatterplot position.
+
+**Limit**
+
+The scatterplot shows association only; movement along the financial axis is not a what-if intervention.{q}"""
+
+    if vid == "finance_structure":
+        return f"""**Visual analysis — {label}**
+
+For **{focus.get('university')}**, the displayed financial structure is: {_compact_pairs(focus.get('indicators') or {}, 2)}. Its Financial score is **{format_number(focus.get('financial_score'),1)}**, compared with an Overall score of **{format_number(focus.get('overall_score'),1)}**.
+
+**Interpretation**
+
+These bars describe different financial concepts, so their raw heights should not be compared as if they shared one common unit. Their value is in exposing the composition of the university's resource/revenue structure and providing the raw context behind the normalized Financial score.
+
+**What to inspect next**
+
+Click an individual bar to focus on that indicator, then place the same indicator on the Finance scatterplot x-axis to see its peer position.
+
+**Limit**
+
+Financial variables are contextual/descriptive and should not be treated as direct causes of academic performance.{q}"""
+
+    if vid == "dea_scatter":
+        return f"""**Visual analysis — {label}**
+
+**{focus.get('university')}** has **DEA-VRS = {format_number(focus.get('vrs'),1)}** and **{focus.get('x_label')} = {format_number(focus.get('x_value'),2)}**. Within the current filter, its DEA-VRS score is around the **{format_number(focus.get('vrs_percentile'),0)}th percentile** and the x-axis value around the **{format_number(focus.get('x_percentile'),0)}th percentile**. The corresponding medians are DEA-VRS **{format_number(focus.get('vrs_median'),1)}** and x-axis **{format_number(focus.get('x_median'),2)}**.
+
+**Interpretation**
+
+The point shows the university's resource/context position together with relative efficiency. A high x-axis value does not imply high efficiency: DEA evaluates the output-to-input relationship relative to the frontier, so universities with different resource levels can occupy very different efficiency positions.
+
+**What to inspect next**
+
+Change the x-axis variable and see whether the selected university's efficiency position remains distinctive relative to other resource indicators.
+
+**Limit**
+
+DEA-VRS is sample- and specification-dependent; the scatterplot is descriptive and does not identify causal effects.{q}"""
+
+    if vid == "dea_trend":
+        ts = focus.get("trend_summary") or {}
+        ch = ts.get("changes") or {}
+        return f"""**Visual analysis — {label}**
+
+For **{focus.get('university')}**, DEA-VRS changes from **{format_number((ts.get('start_values') or {}).get('dea_vrs_efficiency_100'),1)}** to **{format_number((ts.get('end_values') or {}).get('dea_vrs_efficiency_100'),1)}** between **{ts.get('start_year')}** and **{ts.get('end_year')}** (**{_fmt_signed(ch.get('dea_vrs_efficiency_100'))} points**). Over the same period, DEA-CRS changes by **{_fmt_signed(ch.get('dea_crs_efficiency_100'))}** and Scale efficiency by **{_fmt_signed(ch.get('dea_scale_efficiency_100'))}**.
+
+**Interpretation**
+
+The three lines separate pure VRS efficiency, CRS efficiency and the scale component. If VRS is stable while CRS or scale efficiency changes, the movement is more closely associated with scale conditions than with the VRS frontier position.
+
+**What to inspect next**
+
+Compare the years where CRS and VRS diverge most and inspect the corresponding scale-efficiency value.
+
+**Limit**
+
+Year-to-year DEA changes are relative to each year's comparison frontier and are not causal effects.{q}"""
+
+    if vid == "dea_top10":
+        rows = focus.get("rows") or []
+        leaders = ", ".join(f"{r.get('university')} ({format_number(r.get('dea_vrs_efficiency_100'),1)})" for r in rows[:5])
+        frontier_count = sum(1 for r in rows if (_safe_float(r.get('dea_vrs_efficiency_100')) or 0) >= 99.95)
+        return f"""**Visual analysis — {label}**
+
+The visible leading institutions include **{leaders}**. Among the displayed Top-{len(rows)}, **{frontier_count}** have DEA-VRS approximately equal to 100. The active university **{focus.get('selected_university')}** has DEA-VRS **{format_number(focus.get('selected_vrs'),1)}** and yearly rank **{focus.get('selected_rank')}**.
+
+**Interpretation**
+
+A DEA score of 100 indicates frontier membership under the selected VRS specification; it does **not** imply a unique first place. Multiple universities can be efficient simultaneously because each can define a different part of the frontier.
+
+**What to inspect next**
+
+Click a frontier university and compare its inputs/outputs with a lower-efficiency university rather than interpreting the tied score as identical institutional performance.
+
+**Limit**
+
+The frontier depends on the selected variables and yearly sample.{q}"""
+
+    if vid == "ranking_chart":
+        top = focus.get("top_universities") or []
+        leader = top[0] if top else {}
+        return f"""**Visual analysis — {label}**
+
+The current metric is **{focus.get('metric')}**. **{focus.get('selected_university')}** has **{format_number(focus.get('selected_value'),1)}**, rank **{focus.get('rank')}/{focus.get('n')}**, around the **{format_number(focus.get('percentile'),0)}th percentile**. The visible leader is **{leader.get('university')}** with **{format_number(next((v for k,v in leader.items() if k != 'university'), None),1)}**.
+
+**Interpretation**
+
+This chart is metric-specific. A university can move substantially when the metric switches from Overall to Research, Financial or DEA efficiency, which is precisely why the dashboard keeps ranking views separate from the multidimensional profile.
+
+**What to inspect next**
+
+Switch the ranking metric while keeping the same university active and compare the change in position.
+
+**Limit**
+
+The ranking depends on the chosen metric, filters and year; it is not an overall judgment of institutional quality.{q}"""
+
+    if vid in {"time_change", "time_slope"}:
+        ch = focus.get("changes") or {}
+        largest = focus.get("largest_change_dimension")
+        return f"""**Visual analysis — {label}**
+
+For **{focus.get('university')}**, the chart compares **{focus.get('start_year')}** with **{focus.get('end_year')}**. Overall changes by **{_fmt_signed(ch.get('overall_score'))} points**, Teaching by **{_fmt_signed(ch.get('teaching_score'))}**, Placement by **{_fmt_signed(ch.get('placement_score'))}**, Research by **{_fmt_signed(ch.get('research_score'))}**, and Financial by **{_fmt_signed(ch.get('financial_score'))}**. The largest absolute movement is **{str(largest).replace('_score','').title() if largest else 'n/a'}**.
+
+**Interpretation**
+
+The visual distinguishes broad movement from internal rebalancing. If dimensions move in opposing directions, a small Overall change can conceal substantial restructuring inside the profile; if they move together, the temporal pattern is more consistent across dimensions.
+
+**What to inspect next**
+
+Click the bar for the largest change to focus the Companion on its exact start value, end value and change.
+
+**Limit**
+
+These are descriptive changes between observed years, not causal effects.{q}"""
+
+    if vid == "teaching_research_scores":
+        profile = focus.get("profile") or {}
+        return f"""**Visual analysis — {label}**
+
+For **{focus.get('university')}**, the three displayed scores are {_compact_pairs(profile)}. The strongest is **{focus.get('strongest_dimension')}** and the weakest is **{focus.get('weakest_dimension')}**.
+
+**Interpretation**
+
+This chart reveals whether the academic profile is teaching-oriented, placement-oriented, research-oriented, or relatively balanced across the three dimensions. It should be read as a profile shape rather than as a single league-table position.
+
+**What to inspect next**
+
+Click a score bar, then inspect its underlying indicator block to see which raw measures support that composite score.
+
+**Limit**
+
+The three bars are dashboard composites based on the specified normalization and aggregation rules.{q}"""
+
+    if vid == "teaching_indicators":
+        pcts = focus.get("percentiles") or {}
+        return f"""**Visual analysis — {label}**
+
+For **{focus.get('university')}**, the teaching/placement indicators shown are: {_compact_pairs(focus.get('indicators') or {},2)}. The Teaching score is **{format_number(focus.get('teaching_score'),1)}** and the Placement score is **{format_number(focus.get('placement_score'),1)}**. Within the current filter, retention is around the **{format_number(pcts.get('Retention'),0)}th percentile**, graduation around the **{format_number(pcts.get('Graduation'),0)}th percentile**, and employment around the **{format_number(pcts.get('Employment'),0)}th percentile**.
+
+**Interpretation**
+
+The indicator bars explain which student-lifecycle measures are relatively strong or weak behind the composite Teaching and Placement scores. Raw magnitudes should be interpreted according to their own definitions rather than compared directly across unlike units.
+
+**What to inspect next**
+
+Click the indicator with the lowest peer percentile to obtain a focused explanation of that specific component.
+
+**Limit**
+
+These are descriptive indicators and do not identify causal determinants of student outcomes.{q}"""
+
+    if vid == "research_indicators":
+        pcts = focus.get("percentiles") or {}
+        return f"""**Visual analysis — {label}**
+
+For **{focus.get('university')}**, the research indicators shown are: {_compact_pairs(focus.get('indicators') or {},2)}. The composite Research score is **{format_number(focus.get('research_score'),1)}**. Within the current filter, publications per teaching staff are around the **{format_number(pcts.get('Publications/staff'),0)}th percentile**, citations per publication around the **{format_number(pcts.get('Citations/publication'),0)}th percentile**, and H-index around the **{format_number(pcts.get('H-index'),0)}th percentile**.
+
+**Interpretation**
+
+The chart separates research volume, citation impact and visibility-related indicators. A strong composite Research score can therefore arise from several different configurations rather than one single research measure.
+
+**What to inspect next**
+
+Click the indicator that looks most distinctive relative to peers and compare it with the score breakdown on University Profile.
+
+**Limit**
+
+The indicators have different scales and meanings; raw bar heights should not be treated as directly comparable units.{q}"""
+
+    if vid == "teaching_research_scatter":
+        return f"""**Visual analysis — {label}**
+
+**{focus.get('university')}** has Teaching **{format_number(focus.get('teaching_score'),1)}** and Research **{format_number(focus.get('research_score'),1)}**. Within the current filtered group, these correspond to approximately the **{format_number(focus.get('teaching_percentile'),0)}th** and **{format_number(focus.get('research_percentile'),0)}th percentiles**, placing the university **{focus.get('position')}**.
+
+**Interpretation**
+
+The scatterplot makes specialization visible. A point high on Research but closer to the middle on Teaching indicates a research-oriented profile relative to current peers; the reverse indicates stronger teaching positioning. Similar percentiles suggest a more balanced academic position.
+
+**What to inspect next**
+
+Click a nearby university point to compare whether a similar overall academic position is produced by the same Teaching–Research balance.
+
+**Limit**
+
+This is relative positioning within the active filter, not a causal relationship between Teaching and Research.{q}"""
+
+    return f"""**Visual analysis — {label}**
+
+The selected chart is linked to the current **{context.get('view_type')}** context, but there is not enough chart-specific data in the current state to provide a reliable numerical interpretation.
+
+**What to inspect next**
+
+Use the chart's selections or filters to create a more specific analytical state, then request the explanation again.
+
+**Limit**
+
+The Companion will not invent values that are not present in the dashboard context.{q}"""
+
+
 def local_focused_interpretation(context: dict, user_question: str | None = None) -> str:
     """Short interpretation of the exact bar/indicator the user clicked."""
     focus = context.get("focus_details") or build_focus_details(context) or {}
+    if focus.get("focus_kind") == "visual" or focus.get("mode") == "visual":
+        return local_visual_interpretation(context, user_question)
     view = context.get("view_type")
     label = focus.get("label") or focus.get("field") or "selected mark"
     clicked = focus.get("clicked_value")
@@ -2155,6 +2903,96 @@ def generate_local_interpretation(context: dict, user_question: str | None = Non
     return local_single_interpretation(context, user_question)
 
 
+def _focused_answer_is_too_generic(answer: str, context: dict) -> bool:
+    """Reject meta-only focused responses and fall back to deterministic chart analysis."""
+    if not context.get("focus_mode") or not context.get("interaction_focus"):
+        return False
+    focus = context.get("focus_details") or {}
+    text = (answer or "").strip()
+    if len(text.split()) < 65:
+        return True
+    bad_phrases = [
+        "companion is now prioritizing",
+        "you selected dea efficiency vs selected variable",
+        "read this mark in relation to the surrounding observations",
+        "compare the selected mark with its closest benchmark",
+    ]
+    lower = text.lower()
+    if any(p in lower for p in bad_phrases):
+        return True
+    if focus.get("focus_kind") == "visual" or focus.get("mode") == "visual":
+        # Rich visual explanations should contain several numbers when the context has them.
+        numeric_tokens = re.findall(r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?", text)
+        if len(numeric_tokens) < 2:
+            return True
+    return False
+
+
+def local_followup_answer(context: dict, user_question: str) -> str:
+    """Provide a useful deterministic answer when the external model is unavailable.
+
+    It does not try to imitate open-ended reasoning; it answers from the current
+    dashboard evidence and explicitly avoids claims the current view cannot support.
+    """
+    q = (user_question or "").strip()
+    view = context.get("view_type")
+    if not q:
+        return ""
+
+    if context.get("focus_mode") and context.get("focus_details"):
+        focus = context.get("focus_details") or {}
+        if focus.get("focus_kind") == "visual" or focus.get("mode") == "visual":
+            return f"\n\n**Direct answer to your question**\n\nYour question is being answered from the selected visual **{focus.get('label')}**. The chart-specific interpretation above contains the values available for this visual. If the question asks *why* the pattern exists, the current dashboard cannot establish a cause; it can only describe the observed pattern and benchmark position."
+        return f"\n\n**Direct answer to your question**\n\nThe current focus is **{focus.get('label')}**. Based on the clicked mark and its linked comparison values, the safest answer is the focused interpretation above. The dashboard can describe the difference and its relative position, but it cannot identify a causal mechanism behind it."
+
+    if view == "Overview":
+        dims = {"Teaching": context.get("average_teaching_score"), "Placement": context.get("average_placement_score"), "Research": context.get("average_research_score"), "Financial": context.get("average_financial_score")}
+        valid = {k:_safe_float(v) for k,v in dims.items() if _safe_float(v) is not None}
+        strong = max(valid, key=valid.get) if valid else "n/a"
+        weak = min(valid, key=valid.get) if valid else "n/a"
+        return f"\n\n**Direct answer to your question**\n\nFor the current filtered system, the clearest descriptive contrast is **{strong} ({format_number(valid.get(strong),1)})** versus **{weak} ({format_number(valid.get(weak),1)})**. The average Overall score is **{format_number(context.get('average_overall_score'),1)}** across **{context.get('number_of_universities')} universities**. The page supports a system-level descriptive answer, not a causal explanation."
+
+    if view == "University Profile":
+        dims = {"Teaching": context.get("teaching_score"), "Placement": context.get("placement_score"), "Research": context.get("research_score"), "Financial": context.get("financial_score")}
+        valid = {k:_safe_float(v) for k,v in dims.items() if _safe_float(v) is not None}
+        strong = max(valid, key=valid.get) if valid else "n/a"
+        weak = min(valid, key=valid.get) if valid else "n/a"
+        return f"\n\n**Direct answer to your question**\n\nFor **{context.get('university')}**, the strongest dashboard dimension is **{strong} ({format_number(valid.get(strong),1)})** and the weakest is **{weak} ({format_number(valid.get(weak),1)})**; Overall is **{format_number(context.get('overall_score'),1)}**. This is the main profile evidence available for answering the question from this page."
+
+    if view == "University Comparison":
+        gaps = context.get("score_gaps_a_minus_b") or {}
+        named = {"Overall":gaps.get("overall_gap_a_minus_b"), "Teaching":gaps.get("teaching_gap_a_minus_b"), "Placement":gaps.get("placement_gap_a_minus_b"), "Research":gaps.get("research_gap_a_minus_b"), "Financial":gaps.get("financial_gap_a_minus_b")}
+        valid = {k:_safe_float(v) for k,v in named.items() if _safe_float(v) is not None}
+        largest = max(valid, key=lambda k: abs(valid[k])) if valid else "n/a"
+        return f"\n\n**Direct answer to your question**\n\nThe largest current difference is in **{largest} ({_fmt_signed(valid.get(largest))} points, A minus B)**. This is the most informative dimension for explaining the visible separation between the two selected profiles; the page does not establish why that difference exists."
+
+    if view == "Finance Explorer":
+        return f"\n\n**Direct answer to your question**\n\nThe selected university has **{context.get('finance_x_axis')} = {format_number(context.get('selected_x_value'),2)}** versus a current-filter median of **{format_number(context.get('x_axis_median_current_filter'),2)}**, while **{context.get('score_y_axis')} = {format_number(context.get('selected_y_value'),1)}** versus a median of **{format_number(context.get('y_axis_median_current_filter'),1)}**. This supports a descriptive association only, not a causal answer."
+
+    if view == "DEA Efficiency Explorer":
+        return f"\n\n**Direct answer to your question**\n\nThe key DEA evidence is **VRS {format_number(context.get('dea_vrs_efficiency_100'),1)}**, **CRS {format_number(context.get('dea_crs_efficiency_100'),1)}**, and **Scale efficiency {format_number(context.get('dea_scale_efficiency_100'),1)}**. The VRS position is around the **{format_number(context.get('dea_vrs_efficiency_100_percentile_current_filter'),0)}th percentile** in the current filter. These are relative benchmarking results, not causal estimates."
+
+    if view == "Ranking Explorer":
+        return f"\n\n**Direct answer to your question**\n\nFor **{context.get('metric')}**, **{context.get('selected_university')}** is **{context.get('selected_rank_in_current_filter')}/{context.get('number_of_universities')}** with value **{format_number(context.get('selected_value'),1)}**, around the **{format_number(context.get('selected_percentile_current_filter'),0)}th percentile**. Any broader judgment would require checking the other dimensions rather than relying on this one ranking metric."
+
+    if view == "Time Dynamics / What Changed":
+        changes = context.get("changes_end_minus_start") or {}
+        largest = context.get("largest_change_dimension")
+        return f"\n\n**Direct answer to your question**\n\nFrom **{context.get('start_year')}** to **{context.get('end_year')}**, the largest recorded movement is **{str(largest).replace('_score','').title() if largest else 'n/a'} ({_fmt_signed(changes.get(largest))} points)**, while Overall changes by **{_fmt_signed(changes.get('overall_score'))} points**. This describes what changed, not why."
+
+    if view == "Teaching and Research":
+        vals = {"Teaching":context.get("teaching_score"), "Placement":context.get("placement_score"), "Research":context.get("research_score")}
+        valid = {k:_safe_float(v) for k,v in vals.items() if _safe_float(v) is not None}
+        strong = max(valid, key=valid.get) if valid else "n/a"
+        weak = min(valid, key=valid.get) if valid else "n/a"
+        return f"\n\n**Direct answer to your question**\n\nThe clearest academic-profile contrast is **{strong} ({format_number(valid.get(strong),1)})** versus **{weak} ({format_number(valid.get(weak),1)})**. Use the underlying teaching/research indicator bars to identify which observed measures contribute to that profile."
+
+    if view == "Data and Methodology":
+        return "\n\n**Direct answer to your question**\n\nThe dashboard uses normalized profile scores for descriptive comparison and a separate DEA layer for relative efficiency benchmarking. It does not support causal inference or official institutional evaluation."
+
+    return "\n\n**Direct answer to your question**\n\nThe current dashboard context does not contain enough structured evidence to answer that question reliably without adding information that is not visible in the selected view."
+
+
 def generate_ai_interpretation(context: dict, user_question: str | None = None) -> str:
     try:
         api_key = st.secrets.get("OPENAI_API_KEY", None)
@@ -2164,7 +3002,9 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
     evidence_items = context.get("evidence_items", [])
 
     if OpenAI is None or not is_valid_api_key(api_key):
-        local_answer = generate_local_interpretation(context, user_question)
+        local_answer = generate_local_interpretation(context, None)
+        if user_question:
+            local_answer += local_followup_answer(context, user_question)
         return ensure_evidence_references(local_answer, evidence_items)
 
     client = OpenAI(api_key=api_key.strip())
@@ -2184,7 +3024,9 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
             "The context contains an evidence_items registry. For every key quantitative or comparative claim, append one or more evidence IDs in square brackets, for example [E1] or [E2][E3]. Use only IDs that exist in evidence_items.",
             "Evidence IDs are not decorative citations: each one links the explanation back to the visible dashboard section from which the value came.",
             "If interaction_selection is present, treat the chart-clicked university as the explicit user-selected observation and keep the interpretation grounded in that selected mark.",
-            "If focus_mode is true and interaction_focus is present, switch to FOCUSED MODE. Do not give the normal page-wide overview. Start with the heading 'Focused analysis — <clicked label>'. The first sentence must name the exact clicked mark and value. At least 70% of the answer must interpret that selected dimension/indicator/visual, using focus_details. Mention broader page context only when it helps explain the selected mark.",
+            "If focus_mode is true and interaction_focus is present, switch to FOCUSED MODE. Do not give the normal page-wide overview. Use focus_details as the primary evidence source. At least 70% of the answer must interpret the selected mark or visual; broader page context is allowed only when it helps explain it.",
+            "If focus_details.focus_kind is 'visual' or focus_details.mode is 'visual', this is an EXPLAIN-THIS-VISUAL request. Do NOT say merely that the user selected a visual, that the Companion is prioritizing it, or that the mark should be read in context. Instead explain the actual visible pattern using the numerical fields in focus_details: identify the main pattern, quantify the most important comparison, explain what that pattern means on this page, suggest one specific next inspection, and state one limitation. Start with 'Visual analysis — <visual label>'.",
+            "For EXPLAIN-THIS-VISUAL requests, include at least two concrete values from focus_details whenever two or more numeric values are available. Never invent chart values that are absent from focus_details.",
             "In FOCUSED MODE on University Comparison, compare only the clicked dimension for the two selected universities first, state both values and the exact A-minus-B gap, then explain whether that dimension contributes strongly or weakly to the overall gap. Do not repeat a generic comparison-page summary.",
             "In FOCUSED MODE on Finance Explorer or Teaching and Research, explain the selected indicator and how it relates to the relevant composite profile; do not turn one indicator into a causal explanation.",
             "In FOCUSED MODE on Time Dynamics, explain the selected dimension's start value, end value, and change before discussing anything else.",
@@ -2202,9 +3044,14 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
             model="gpt-4.1-mini",
             input=json.dumps(prompt, ensure_ascii=True),
         )
-        return ensure_evidence_references(response.output_text, evidence_items)
+        model_answer = response.output_text
+        if _focused_answer_is_too_generic(model_answer, context):
+            model_answer = generate_local_interpretation(context, user_question)
+        return ensure_evidence_references(model_answer, evidence_items)
     except Exception:
-        local_answer = generate_local_interpretation(context, user_question)
+        local_answer = generate_local_interpretation(context, None)
+        if user_question:
+            local_answer += local_followup_answer(context, user_question)
         return ensure_evidence_references(local_answer, evidence_items)
 
 
@@ -2671,6 +3518,20 @@ with main_col:
         request_visual_explanation("University Profile", "Weight sensitivity scenarios", "visual::weight_sensitivity", "explain_weight_sensitivity")
 
         trend = df[df["university"] == university].sort_values("year")
+        if not trend.empty:
+            _trend_fields = ["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"]
+            _trend_start = trend.iloc[0]
+            _trend_end = trend.iloc[-1]
+            _trend_changes = {f: clean_value(_trend_end.get(f) - _trend_start.get(f)) for f in _trend_fields if f in trend.columns}
+            _largest_trend = max(_trend_changes, key=lambda f: abs(float(_trend_changes.get(f) or 0))) if _trend_changes else None
+            active_context["profile_trend_summary"] = {
+                "start_year": int(_trend_start.get("year")),
+                "end_year": int(_trend_end.get("year")),
+                "start_values": {f: clean_value(_trend_start.get(f)) for f in _trend_fields if f in trend.columns},
+                "end_values": {f: clean_value(_trend_end.get(f)) for f in _trend_fields if f in trend.columns},
+                "changes": _trend_changes,
+                "largest_change_dimension": _largest_trend,
+            }
         trend_long = trend.melt(
             id_vars=["year", "university"],
             value_vars=["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"],
@@ -3034,6 +3895,9 @@ with main_col:
             dea_x_col = dea_x_options[dea_x_label]
             active_context["dea_scatter_x_axis"] = dea_x_label
             active_context["dea_scatter_x_value"] = clean_value(selected.get(dea_x_col))
+            _dea_x_series = numeric_series(filtered, dea_x_col)
+            active_context["dea_scatter_x_median_current_filter"] = clean_value(_dea_x_series.median()) if not _dea_x_series.empty else None
+            active_context["dea_scatter_x_percentile_current_filter"] = clean_value(percentile_position(filtered, dea_x_col, selected.get(dea_x_col)))
 
             dea_data = filtered.copy()
             dea_data["selected_flag"] = dea_data["university"].eq(university)
@@ -3091,6 +3955,17 @@ with main_col:
             with dc1:
                 st.markdown("#### DEA trend, 2020-2023")
                 dea_trend = df[df["university"].eq(university)].sort_values("year")
+                if not dea_trend.empty:
+                    _dea_fields = ["dea_vrs_efficiency_100", "dea_crs_efficiency_100", "dea_scale_efficiency_100"]
+                    _dea_start = dea_trend.iloc[0]
+                    _dea_end = dea_trend.iloc[-1]
+                    active_context["dea_trend_summary"] = {
+                        "start_year": int(_dea_start.get("year")),
+                        "end_year": int(_dea_end.get("year")),
+                        "start_values": {f: clean_value(_dea_start.get(f)) for f in _dea_fields if f in dea_trend.columns},
+                        "end_values": {f: clean_value(_dea_end.get(f)) for f in _dea_fields if f in dea_trend.columns},
+                        "changes": {f: clean_value(_dea_end.get(f) - _dea_start.get(f)) for f in _dea_fields if f in dea_trend.columns},
+                    }
                 dea_trend_long = dea_trend.melt(
                     id_vars=["year", "university"],
                     value_vars=["dea_vrs_efficiency_100", "dea_crs_efficiency_100", "dea_scale_efficiency_100"],
@@ -3113,6 +3988,7 @@ with main_col:
             with dc2:
                 st.markdown("#### Top 10 by DEA-VRS efficiency")
                 top_dea = filtered.sort_values("dea_vrs_efficiency_100", ascending=False).head(10)
+                active_context["dea_top10"] = top_dea[["university", "dea_vrs_efficiency_100", "efficiency_category"]].to_dict("records")
                 dea_top_university_selection = alt.selection_point(name="dea_top_university_selection", fields=["university"], on="click", clear="dblclick")
                 top_dea_chart = (
                     alt.Chart(top_dea)
@@ -3478,6 +4354,9 @@ if chart_focus_meta.get("source_page") == page:
 # Build the evidence registry after all page-specific controls have defined the active context.
 # This makes the dashboard -> Companion link explicit and keeps the evidence synchronized
 # with year, university, filters, selected axes, ranking metric, and comparison choices.
+# The logic version intentionally changes the automatic-analysis signature after Companion
+# upgrades so an old in-session cached response cannot survive a code update.
+active_context["companion_logic_version"] = COMPANION_LOGIC_VERSION
 active_context["evidence_items"] = build_evidence_items(active_context)
 _focus_field = current_focus_field()
 if _focus_field:
@@ -3537,10 +4416,16 @@ with ai_col:
         )
     interaction_focus = active_context.get("interaction_focus")
     if interaction_focus:
-        st.info(
-            f"Focused mode: {interaction_focus.get('label') or interaction_focus.get('field')} "
-            f"({interaction_focus.get('value')}). The Companion will analyze this clicked mark instead of summarizing the whole page."
-        )
+        if interaction_focus.get("focus_kind") == "visual" or interaction_focus.get("interaction") == "explain visual request":
+            st.info(
+                f"Visual focus: {interaction_focus.get('label') or interaction_focus.get('field')}. "
+                "The Companion will explain the actual pattern in this chart using the current dashboard values."
+            )
+        else:
+            st.info(
+                f"Focused mode: {interaction_focus.get('label') or interaction_focus.get('field')} "
+                f"({interaction_focus.get('value')}). The Companion will analyze this clicked mark instead of summarizing the whole page."
+            )
     if active_context.get("evidence_focus"):
         ef = active_context["evidence_focus"]
         st.caption(f"Evidence focus: {ef.get('label')} = {ef.get('display_value')}. The linked visual mark is highlighted in black.")
