@@ -5,6 +5,7 @@ import html
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import altair as alt
 import pandas as pd
@@ -54,6 +55,20 @@ st.markdown(
         color: #5b606b;
         font-size: 0.9rem;
     }
+    .focus-callout {
+        border: 2px solid rgba(49, 51, 63, 0.55);
+        border-radius: 10px;
+        padding: 0.65rem 0.8rem;
+        margin: 0.35rem 0 0.8rem 0;
+        background: rgba(255, 248, 220, 0.75);
+    }
+    .focus-value {
+        display: inline-block;
+        font-weight: 800;
+        font-size: 1.05rem;
+        border-bottom: 3px solid rgba(49, 51, 63, 0.55);
+        padding: 0 0.15rem;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -87,31 +102,39 @@ def _mapping_get(value: Any, key: str, default: Any = None) -> Any:
         return getattr(value, key, default)
 
 
-def extract_chart_selected_university(chart_key: str, selection_name: str) -> str | None:
-    """Extract the university field from a Streamlit/Vega-Lite point-selection state."""
+def extract_chart_selection_field(chart_key: str, selection_name: str, field: str) -> Any:
+    """Extract one field from a Streamlit/Vega-Lite point-selection state."""
     chart_state = st.session_state.get(chart_key)
     selection_state = _mapping_get(chart_state, "selection", {})
     payload = _mapping_get(selection_state, selection_name)
     if not payload:
         return None
 
-    if isinstance(payload, (list, tuple)):
-        for item in reversed(payload):
-            candidate = _mapping_get(item, "university")
-            if isinstance(candidate, (list, tuple)):
-                candidate = candidate[-1] if candidate else None
-            if candidate:
-                return str(candidate)
-        return None
+    candidates = payload if isinstance(payload, (list, tuple)) else [payload]
+    for item in reversed(candidates):
+        candidate = _mapping_get(item, field)
+        if isinstance(candidate, (list, tuple)):
+            candidate = candidate[-1] if candidate else None
+        if candidate is not None and candidate != "":
+            return candidate
+    return None
 
-    candidate = _mapping_get(payload, "university")
-    if isinstance(candidate, (list, tuple)):
-        candidate = candidate[-1] if candidate else None
+
+def extract_chart_selected_university(chart_key: str, selection_name: str) -> str | None:
+    candidate = extract_chart_selection_field(chart_key, selection_name, "university")
     return str(candidate) if candidate else None
 
 
+def _clear_deep_focus() -> None:
+    try:
+        if "focus_field" in st.query_params:
+            del st.query_params["focus_field"]
+    except Exception:
+        pass
+
+
 def _sync_chart_selection_to_sidebar(chart_key: str, selection_name: str, source_page: str) -> None:
-    """Make a clicked chart point the active university for the entire dashboard."""
+    """Make a clicked university mark the active university for the entire dashboard."""
     clicked_university = extract_chart_selected_university(chart_key, selection_name)
     if not clicked_university:
         return
@@ -120,35 +143,110 @@ def _sync_chart_selection_to_sidebar(chart_key: str, selection_name: str, source
     if valid_options and clicked_university not in valid_options:
         return
 
+    _clear_deep_focus()
     st.session_state["university_selector"] = clicked_university
     st.session_state["chart_selection_meta"] = {
         "university": clicked_university,
         "source_page": source_page,
-        "interaction": "chart point click",
+        "interaction": "chart mark click",
+    }
+    st.session_state["chart_focus_meta"] = None
+    st.session_state["ai_answer"] = ""
+    st.session_state["last_ai_signature"] = ""
+
+
+def _sync_chart_focus(chart_key: str, selection_name: str, source_page: str, field_name: str = "Field", label_name: str = "Label", value_name: str = "Value") -> None:
+    """Focus the Companion and visualization on a clicked dimension/indicator bar."""
+    field = extract_chart_selection_field(chart_key, selection_name, field_name)
+    if not field:
+        return
+    label = extract_chart_selection_field(chart_key, selection_name, label_name)
+    value = extract_chart_selection_field(chart_key, selection_name, value_name)
+    _clear_deep_focus()
+    st.session_state["chart_focus_meta"] = {
+        "source_page": source_page,
+        "interaction": "chart bar click",
+        "field": str(field),
+        "label": clean_value(label) if label is not None else str(field),
+        "value": clean_value(value),
     }
     st.session_state["ai_answer"] = ""
     st.session_state["last_ai_signature"] = ""
 
 
 def on_finance_scatter_select() -> None:
-    _sync_chart_selection_to_sidebar(
-        "finance_scatter_chart",
-        "finance_point_selection",
-        "Finance Explorer",
-    )
+    _sync_chart_selection_to_sidebar("finance_scatter_chart", "finance_point_selection", "Finance Explorer")
 
 
 def on_dea_scatter_select() -> None:
-    _sync_chart_selection_to_sidebar(
-        "dea_scatter_chart",
-        "dea_point_selection",
-        "DEA Efficiency Explorer",
-    )
+    _sync_chart_selection_to_sidebar("dea_scatter_chart", "dea_point_selection", "DEA Efficiency Explorer")
+
+
+def on_overview_top_select() -> None:
+    _sync_chart_selection_to_sidebar("overview_top_chart", "overview_university_selection", "Overview")
+
+
+def on_ranking_bar_select() -> None:
+    _sync_chart_selection_to_sidebar("ranking_bar_chart", "ranking_university_selection", "Ranking Explorer")
+
+
+def on_dea_top_select() -> None:
+    _sync_chart_selection_to_sidebar("dea_top_chart", "dea_top_university_selection", "DEA Efficiency Explorer")
+
+
+def on_teaching_research_scatter_select() -> None:
+    _sync_chart_selection_to_sidebar("teaching_research_scatter_chart", "teaching_research_university_selection", "Teaching and Research")
+
+
+def on_profile_dimension_select() -> None:
+    _sync_chart_focus("profile_dimension_chart", "profile_dimension_selection", "University Profile")
+
+
+def on_finance_indicator_select() -> None:
+    _sync_chart_focus("finance_indicator_chart", "finance_indicator_selection", "Finance Explorer", label_name="Indicator")
+
+
+def on_teaching_indicator_select() -> None:
+    _sync_chart_focus("teaching_indicator_chart", "teaching_indicator_selection", "Teaching and Research", label_name="Indicator")
+
+
+def on_research_indicator_select() -> None:
+    _sync_chart_focus("research_indicator_chart", "research_indicator_selection", "Teaching and Research", label_name="Indicator")
+
+
+def on_teaching_research_score_select() -> None:
+    _sync_chart_focus("teaching_research_score_chart", "teaching_research_score_selection", "Teaching and Research")
+
+
+def on_comparison_score_select() -> None:
+    field = extract_chart_selection_field("comparison_score_chart", "comparison_score_selection", "Field")
+    dimension = extract_chart_selection_field("comparison_score_chart", "comparison_score_selection", "Dimension")
+    value = extract_chart_selection_field("comparison_score_chart", "comparison_score_selection", "Score")
+    uni = extract_chart_selection_field("comparison_score_chart", "comparison_score_selection", "University")
+    if not field:
+        return
+    _clear_deep_focus()
+    st.session_state["chart_focus_meta"] = {
+        "source_page": "University Comparison", "interaction": "comparison bar click",
+        "field": str(field), "label": f"{uni} — {dimension}", "value": clean_value(value), "university": clean_value(uni),
+    }
+    st.session_state["ai_answer"] = ""
+    st.session_state["last_ai_signature"] = ""
+
+
+def on_comparison_gap_select() -> None:
+    _sync_chart_focus("comparison_gap_chart", "comparison_gap_selection", "University Comparison", field_name="Field", label_name="Dimension", value_name="Gap")
+
+
+def on_time_change_select() -> None:
+    _sync_chart_focus("time_change_chart", "time_change_selection", "Time Dynamics / What Changed", field_name="Field", label_name="Dimension", value_name="Change")
 
 
 def on_sidebar_university_change() -> None:
-    """A manual sidebar choice supersedes the previous chart-origin selection."""
+    """A manual sidebar choice supersedes previous chart-origin selections and deep focus."""
+    _clear_deep_focus()
     st.session_state["chart_selection_meta"] = None
+    st.session_state["chart_focus_meta"] = None
     st.session_state["ai_answer"] = ""
     st.session_state["last_ai_signature"] = ""
 
@@ -244,6 +342,17 @@ def make_overview_context(filtered: pd.DataFrame, year: int, macro_area: str, re
         "average_placement_score": clean_value(filtered["placement_score"].mean()),
         "average_research_score": clean_value(filtered["research_score"].mean()),
         "average_financial_score": clean_value(filtered["financial_score"].mean()),
+        "average_profile_range": clean_value(max(
+            filtered["teaching_score"].mean(),
+            filtered["placement_score"].mean(),
+            filtered["research_score"].mean(),
+            filtered["financial_score"].mean(),
+        ) - min(
+            filtered["teaching_score"].mean(),
+            filtered["placement_score"].mean(),
+            filtered["research_score"].mean(),
+            filtered["financial_score"].mean(),
+        )),
         "average_dea_vrs_efficiency": clean_value(filtered["dea_vrs_efficiency_100"].mean()) if "dea_vrs_efficiency_100" in filtered.columns else None,
         "top_universities": top[["university", "overall_score", "overall_rank_year"]].to_dict("records"),
         "lowest_universities": bottom[["university", "overall_score", "overall_rank_year"]].to_dict("records"),
@@ -300,38 +409,41 @@ def comparison_context(row_a: pd.Series, row_b: pd.Series) -> dict:
     }
 
 
-def make_score_profile(row: pd.Series) -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "Dimension": ["Teaching", "Placement", "Research", "Financial"],
-            "Score": [
-                row["teaching_score"],
-                row["placement_score"],
-                row["research_score"],
-                row["financial_score"],
-            ],
-        }
-    )
+def make_score_profile(row: pd.Series, include_overall: bool = True) -> pd.DataFrame:
+    rows = []
+    if include_overall:
+        rows.append({"Dimension": "Overall", "Label": "Overall", "Field": "overall_score", "Score": float(row["overall_score"]), "Value": float(row["overall_score"])})
+    for label, field in [("Teaching", "teaching_score"), ("Placement", "placement_score"), ("Research", "research_score"), ("Financial", "financial_score")]:
+        rows.append({"Dimension": label, "Label": label, "Field": field, "Score": float(row[field]), "Value": float(row[field])})
+    return pd.DataFrame(rows)
 
 
-def make_indicator_bar(row: pd.Series, indicators: dict[str, str]) -> alt.Chart:
+def make_indicator_bar(row: pd.Series, indicators: dict[str, str], focus_field: str | None = None) -> alt.Chart:
     data = []
     for col, label in indicators.items():
         if col in row.index and pd.notna(row[col]):
-            data.append({"Indicator": label, "Value": float(row[col])})
+            data.append({"Indicator": label, "Label": label, "Field": col, "Value": float(row[col]), "Focused": bool(focus_field == col)})
     chart_df = pd.DataFrame(data)
     if chart_df.empty:
-        chart_df = pd.DataFrame({"Indicator": ["No data"], "Value": [0]})
-    return (
+        chart_df = pd.DataFrame({"Indicator": ["No data"], "Label": ["No data"], "Field": ["none"], "Value": [0.0], "Focused": [False]})
+    base = (
         alt.Chart(chart_df)
         .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
         .encode(
             y=alt.Y("Indicator:N", sort="-x", title=None),
             x=alt.X("Value:Q", title="Value"),
-            tooltip=["Indicator", alt.Tooltip("Value:Q", format=",.2f")],
+            color=alt.condition("datum.Focused", alt.value("#111111"), alt.value("#4c78a8")),
+            stroke=alt.condition("datum.Focused", alt.value("#111111"), alt.value(None)),
+            strokeWidth=alt.condition("datum.Focused", alt.value(3), alt.value(0)),
+            tooltip=["Indicator", "Field", alt.Tooltip("Value:Q", format=",.2f")],
         )
-        .properties(height=max(260, 38 * len(chart_df)))
     )
+    labels = (
+        alt.Chart(chart_df)
+        .mark_text(align="left", dx=5)
+        .encode(y=alt.Y("Indicator:N", sort="-x"), x=alt.X("Value:Q"), text=alt.Text("Value:Q", format=",.2f"))
+    )
+    return (base + labels).properties(height=max(260, 38 * len(chart_df)))
 
 
 def numeric_series(data: pd.DataFrame, column: str) -> pd.Series:
@@ -608,11 +720,12 @@ def build_evidence_items(context: dict) -> list[dict]:
 
     if view == "Overview":
         add("Universities in current filter", context.get("number_of_universities"), "Overview summary", "number_of_universities", "source-overview-summary", 0)
-        add("Average overall score", context.get("average_overall_score"), "Overview summary", "average_overall_score", "source-overview-summary", 1)
+        add("Average overall score", context.get("average_overall_score"), "Overview profile", "average_overall_score", "source-overview-profile", 1)
         add("Average teaching score", context.get("average_teaching_score"), "Overview profile", "average_teaching_score", "source-overview-profile", 1)
         add("Average placement score", context.get("average_placement_score"), "Overview profile", "average_placement_score", "source-overview-profile", 1)
         add("Average research score", context.get("average_research_score"), "Overview profile", "average_research_score", "source-overview-profile", 1)
         add("Average financial score", context.get("average_financial_score"), "Overview profile", "average_financial_score", "source-overview-profile", 1)
+        add("Average profile spread", context.get("average_profile_range"), "Overview profile", "average_profile_range", "source-overview-profile", 1)
         add("Average DEA-VRS efficiency", context.get("average_dea_vrs_efficiency"), "Overview profile", "average_dea_vrs_efficiency", "source-overview-profile", 1)
 
     elif view == "University Comparison" and context.get("university_a") and context.get("university_b"):
@@ -648,7 +761,7 @@ def build_evidence_items(context: dict) -> list[dict]:
         add("Efficiency category", context.get("efficiency_category"), "DEA summary", "efficiency_category", "source-dea-summary")
 
     elif view == "Ranking Explorer":
-        add(context.get("metric", "Selected ranking metric"), context.get("selected_value"), "Ranking summary", "selected_value", "source-ranking-summary", 1)
+        add(context.get("metric", "Selected ranking metric"), context.get("selected_value"), "Ranking chart", "selected_value", "source-ranking-chart", 1)
         add("Rank in current filter", context.get("selected_rank_in_current_filter"), "Ranking summary", "selected_rank_in_current_filter", "source-ranking-summary", 0)
         add("Percentile in current filter", context.get("selected_percentile_current_filter"), "Ranking summary", "selected_percentile_current_filter", "source-ranking-summary", 0, "th percentile")
         add("Universities in current ranking", context.get("number_of_universities"), "Ranking summary", "number_of_universities", "source-ranking-summary", 0)
@@ -674,7 +787,7 @@ def build_evidence_items(context: dict) -> list[dict]:
         add("Teaching percentile in current filter", context.get("teaching_score_percentile_current_filter"), "Teaching vs research positioning", "teaching_score_percentile_current_filter", "source-teaching-research", 0, "th percentile")
         add("Research percentile in current filter", context.get("research_score_percentile_current_filter"), "Teaching vs research positioning", "research_score_percentile_current_filter", "source-teaching-research", 0, "th percentile")
         add("Second-year retention", context.get("second_year_retention_pct"), "Teaching indicators", "second_year_retention_pct", "source-teaching-indicators", 1, "%")
-        add("Publications per teaching staff", context.get("publications_per_teaching_staff"), "Research indicators", "publications_per_teaching_staff", "source-teaching-indicators", 2)
+        add("Publications per teaching staff", context.get("publications_per_teaching_staff"), "Research indicators", "publications_per_teaching_staff", "source-research-indicators", 2)
 
     elif view == "Data and Methodology":
         add("Dataset scope", context.get("dataset_scope"), "Data and Methodology", "dataset_scope", "source-methodology")
@@ -682,7 +795,7 @@ def build_evidence_items(context: dict) -> list[dict]:
         add("Score definition", context.get("score_definition"), "Data and Methodology", "score_definition", "source-methodology")
 
     else:  # University Profile and other single-university pages
-        add("Overall score", context.get("overall_score"), "University profile summary", "overall_score", "source-profile-summary", 1)
+        add("Overall score", context.get("overall_score"), "Dimension profile", "overall_score", "source-profile-dimensions", 1)
         add("Overall rank", context.get("overall_rank_year"), "University profile summary", "overall_rank_year", "source-profile-summary", 0)
         add("Teaching score", context.get("teaching_score"), "Dimension profile", "teaching_score", "source-profile-dimensions", 1)
         add("Placement score", context.get("placement_score"), "Dimension profile", "placement_score", "source-profile-dimensions", 1)
@@ -716,6 +829,93 @@ def linkify_evidence_citations(answer: str, evidence_items: list[dict]) -> str:
     return re.sub(r"\[(E\d+)\]", repl, answer or "")
 
 
+def evidence_deep_link(item: dict) -> str:
+    field = quote(str(item.get("field", "")), safe="")
+    anchor = item.get("anchor", "source-current-view")
+    return f"?focus_field={field}#{anchor}"
+
+
+def linkify_evidence_values(answer: str, evidence_items: list[dict]) -> str:
+    """Turn evidence-backed numeric values in Companion prose into deep links to their visual source."""
+    result = answer or ""
+    numeric_items = [item for item in evidence_items if item.get("value") is not None and not isinstance(item.get("value"), str)]
+
+    # First, pair each number with its nearby evidence ID. This disambiguates repeated values such as 100.0.
+    for item in numeric_items:
+        display = str(item.get("display_value", ""))
+        if not display:
+            continue
+        url = evidence_deep_link(item)
+        eid = re.escape(str(item.get("id", "")))
+        pattern = rf"(?<![\w\[]){re.escape(display)}(?![\w\]])(?=[^\n]{{0,80}}\[{eid}\])"
+        result = re.sub(pattern, f"[{display}]({url})", result)
+
+    # Then link values that are unique in the evidence registry even if the model placed the evidence ID farther away.
+    counts: dict[str, int] = {}
+    for item in numeric_items:
+        display = str(item.get("display_value", ""))
+        counts[display] = counts.get(display, 0) + 1
+    for item in numeric_items:
+        display = str(item.get("display_value", ""))
+        if not display or counts.get(display) != 1:
+            continue
+        url = evidence_deep_link(item)
+        pattern = rf"(?<![\w\[]){re.escape(display)}(?![\w\]])"
+        result = re.sub(pattern, f"[{display}]({url})", result)
+    return result
+
+
+def normalize_visual_focus_field(field: str | None) -> str | None:
+    if not field:
+        return None
+    mapping = {
+        "score_gaps_a_minus_b.overall_gap_a_minus_b": "overall_score",
+        "score_gaps_a_minus_b.teaching_gap_a_minus_b": "teaching_score",
+        "score_gaps_a_minus_b.placement_gap_a_minus_b": "placement_score",
+        "score_gaps_a_minus_b.research_gap_a_minus_b": "research_score",
+        "score_gaps_a_minus_b.financial_gap_a_minus_b": "financial_score",
+        "changes_end_minus_start.overall_score": "overall_score",
+        "changes_end_minus_start.teaching_score": "teaching_score",
+        "changes_end_minus_start.placement_score": "placement_score",
+        "changes_end_minus_start.research_score": "research_score",
+        "changes_end_minus_start.financial_score": "financial_score",
+        "changes_end_minus_start.dea_vrs_efficiency_100": "dea_vrs_efficiency_100",
+        "start_values.overall_score": "overall_score",
+        "end_values.overall_score": "overall_score",
+    }
+    return mapping.get(field, field)
+
+
+def current_focus_field() -> str | None:
+    try:
+        value = st.query_params.get("focus_field")
+    except Exception:
+        value = None
+    if isinstance(value, list):
+        value = value[-1] if value else None
+    return str(value) if value else None
+
+
+def page_focus_field(page_name: str) -> str | None:
+    deep = current_focus_field()
+    chart_meta = st.session_state.get("chart_focus_meta") or {}
+    if chart_meta.get("source_page") == page_name and chart_meta.get("field"):
+        return normalize_visual_focus_field(str(chart_meta.get("field")))
+    return normalize_visual_focus_field(deep)
+
+
+def render_focus_callout(field: str, label: str, value: Any) -> None:
+    if current_focus_field() != field:
+        return
+    safe_label = html.escape(str(label))
+    safe_value = html.escape(_evidence_value_text(value, 2 if isinstance(value, float) and abs(value) < 10 else 1))
+    st.markdown(
+        f"<div class='focus-callout'>Linked from the Analysis Companion: <b>{safe_label}</b> = "
+        f"<span class='focus-value'>{safe_value}</span>. The corresponding mark is outlined in black below.</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def ensure_evidence_references(answer: str, evidence_items: list[dict]) -> str:
     if not evidence_items:
         return answer
@@ -731,15 +931,16 @@ def render_evidence_registry(evidence_items: list[dict], answer: str = "") -> No
     cited = extract_evidence_ids(answer, evidence_items)
     shown = [item for item in evidence_items if item["id"] in cited] if cited else evidence_items[:6]
     st.markdown("#### Evidence linked to the interpretation")
-    st.caption("Evidence references in the Companion are clickable and return to the corresponding dashboard section.")
+    st.caption("Both evidence IDs and evidence values are clickable. They return to the corresponding dashboard section; supported charts outline the linked mark in black.")
     for item in shown:
         label = html.escape(str(item["label"]))
         value = html.escape(str(item["display_value"]))
         source = html.escape(str(item["source"]))
         field = html.escape(str(item.get("field", "")))
+        deep_link = evidence_deep_link(item)
         st.markdown(
             f"<div class='evidence-card'><span class='evidence-id'>{item['id']}</span>"
-            f"<b>{label}</b><br><span>{value}</span><br>"
+            f"<b>{label}</b><br><a href='{deep_link}'><span class='focus-value'>{value}</span></a><br>"
             f"<span class='small-note'>Source: {source} · field: {field}</span></div>",
             unsafe_allow_html=True,
         )
@@ -1249,6 +1450,8 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
             "The context contains an evidence_items registry. For every key quantitative or comparative claim, append one or more evidence IDs in square brackets, for example [E1] or [E2][E3]. Use only IDs that exist in evidence_items.",
             "Evidence IDs are not decorative citations: each one links the explanation back to the visible dashboard section from which the value came.",
             "If interaction_selection is present, treat the chart-clicked university as the explicit user-selected observation and keep the interpretation grounded in that selected mark.",
+            "If interaction_focus is present, prioritize the clicked dimension or indicator and explain it in the context of the current page without losing the broader profile.",
+            "If evidence_focus is present, explicitly address that evidence item because the user clicked its number in the previous Companion explanation.",
             "Explain what the pattern means for the current page: profile shape, trade-offs, benchmark position, specialization, outlier behavior, or balance between dimensions.",
             "Use phrases such as: this suggests, this indicates, this points to, this should be read as, but do not state causality.",
             "Return: analytical summary, interpretation of the main pattern, strengths/trade-offs, what to inspect next, and limitation.",
@@ -1267,42 +1470,42 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
         return ensure_evidence_references(local_answer, evidence_items)
 
 
-def score_bar_chart(score_df: pd.DataFrame) -> alt.Chart:
-    return (
-        alt.Chart(score_df)
+def score_bar_chart(score_df: pd.DataFrame, focus_field: str | None = None) -> alt.Chart:
+    data = score_df.copy()
+    data["Focused"] = data["Field"].eq(focus_field) if "Field" in data.columns else False
+    bars = (
+        alt.Chart(data)
         .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
         .encode(
             x=alt.X("Dimension:N", sort=None, title="Dimension"),
             y=alt.Y("Score:Q", title="Score", scale=alt.Scale(domain=[0, 100])),
-            color=alt.Color("Dimension:N", legend=None),
-            tooltip=["Dimension", alt.Tooltip("Score:Q", format=".1f")],
+            color=alt.condition("datum.Focused", alt.value("#111111"), alt.Color("Dimension:N", legend=None)),
+            stroke=alt.condition("datum.Focused", alt.value("#111111"), alt.value(None)),
+            strokeWidth=alt.condition("datum.Focused", alt.value(3), alt.value(0)),
+            tooltip=["Dimension", "Field", alt.Tooltip("Score:Q", format=".1f")],
         )
-        .properties(height=300)
     )
+    labels = alt.Chart(data).mark_text(dy=-8).encode(x=alt.X("Dimension:N", sort=None), y="Score:Q", text=alt.Text("Score:Q", format=".1f"))
+    return (bars + labels).properties(height=300)
 
 
-def benchmark_chart(row: pd.Series) -> alt.Chart:
-    benchmark_df = pd.DataFrame(
-        {
-            "Benchmark": ["Selected university", "National average", "Macro-area average"],
-            "Overall score": [
-                row["overall_score"],
-                row["national_avg_overall_score"],
-                row["macro_area_avg_overall_score"],
-            ],
-        }
+def benchmark_chart(row: pd.Series, focus_field: str | None = None) -> alt.Chart:
+    benchmark_df = pd.DataFrame([
+        {"Benchmark":"Selected university", "Field":"overall_score", "Overall score":float(row["overall_score"])},
+        {"Benchmark":"National average", "Field":"national_avg_overall_score", "Overall score":float(row["national_avg_overall_score"])},
+        {"Benchmark":"Macro-area average", "Field":"macro_area_avg_overall_score", "Overall score":float(row["macro_area_avg_overall_score"])},
+    ])
+    benchmark_df["Focused"] = benchmark_df["Field"].eq(focus_field)
+    bars = alt.Chart(benchmark_df).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+        x=alt.X("Benchmark:N", sort=None, title="Benchmark"),
+        y=alt.Y("Overall score:Q", title="Overall score", scale=alt.Scale(domain=[0, 100])),
+        color=alt.condition("datum.Focused", alt.value("#111111"), alt.Color("Benchmark:N", legend=None)),
+        stroke=alt.condition("datum.Focused", alt.value("#111111"), alt.value(None)),
+        strokeWidth=alt.condition("datum.Focused", alt.value(3), alt.value(0)),
+        tooltip=["Benchmark", "Field", alt.Tooltip("Overall score:Q", format=".1f")],
     )
-    return (
-        alt.Chart(benchmark_df)
-        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
-        .encode(
-            x=alt.X("Benchmark:N", sort=None, title="Benchmark"),
-            y=alt.Y("Overall score:Q", title="Overall score", scale=alt.Scale(domain=[0, 100])),
-            color=alt.Color("Benchmark:N", legend=None),
-            tooltip=["Benchmark", alt.Tooltip("Overall score:Q", format=".1f")],
-        )
-        .properties(height=300)
-    )
+    labels = alt.Chart(benchmark_df).mark_text(dy=-8).encode(x=alt.X("Benchmark:N", sort=None), y="Overall score:Q", text=alt.Text("Overall score:Q", format=".1f"))
+    return (bars + labels).properties(height=300)
 
 
 df = load_data()
@@ -1358,7 +1561,7 @@ with st.sidebar:
         key="university_selector",
         on_change=on_sidebar_university_change,
     )
-    st.caption("Tip: on Finance and DEA pages you can also click a scatterplot point to select a university.")
+    st.caption("Tip: interactive marks are available across the dashboard. Click university marks to change the active university; click dimension/indicator bars to focus the Companion on that metric.")
 
 selected = filtered[filtered["university"] == university].iloc[0]
 
@@ -1400,17 +1603,26 @@ with main_col:
         o3.metric("Average teaching", f"{filtered['teaching_score'].mean():.1f}")
         o4.metric("Average research", f"{filtered['research_score'].mean():.1f}")
 
-        top10 = filtered.sort_values("overall_score", ascending=False).head(10)
+        top10 = filtered.sort_values("overall_score", ascending=False).head(10).copy()
+        overview_university_selection = alt.selection_point(name="overview_university_selection", fields=["university"], on="click", clear="dblclick")
         top_chart = (
             alt.Chart(top10)
             .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
             .encode(
                 x=alt.X("overall_score:Q", title="Overall score", scale=alt.Scale(domain=[0, 100])),
                 y=alt.Y("university:N", sort="-x", title=None),
+                color=alt.condition(alt.datum.university == university, alt.value("#111111"), alt.value("#4c78a8")),
                 tooltip=["university", "region", alt.Tooltip("overall_score:Q", format=".1f")],
             )
+            .add_params(overview_university_selection)
             .properties(height=360)
         )
+        top_labels = (
+            alt.Chart(top10)
+            .mark_text(align="left", dx=5)
+            .encode(x=alt.X("overall_score:Q"), y=alt.Y("university:N", sort="-x"), text=alt.Text("overall_score:Q", format=".1f"))
+        )
+        top_chart = top_chart + top_labels
         macro_avg = (
             filtered.groupby("macro_area", as_index=False)[["overall_score", "teaching_score", "research_score", "financial_score"]]
             .mean()
@@ -1431,9 +1643,30 @@ with main_col:
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("#### Top 10 universities by overall score")
-            st.altair_chart(top_chart, width="stretch")
+            st.caption("Click a university bar to make it the active dashboard selection.")
+            st.altair_chart(top_chart, key="overview_top_chart", on_select=on_overview_top_select, selection_mode=["overview_university_selection"], width="stretch")
         with c2:
             st.markdown("<div id='source-overview-profile'></div>", unsafe_allow_html=True)
+            st.markdown("#### Current filtered average profile")
+            overview_focus = page_focus_field("Overview")
+            if overview_focus == "average_profile_range":
+                render_focus_callout("average_profile_range", "Average profile spread", active_context.get("average_profile_range"))
+            avg_profile = pd.DataFrame([
+                {"Dimension":"Overall", "Field":"average_overall_score", "Score":float(filtered["overall_score"].mean())},
+                {"Dimension":"Teaching", "Field":"average_teaching_score", "Score":float(filtered["teaching_score"].mean())},
+                {"Dimension":"Placement", "Field":"average_placement_score", "Score":float(filtered["placement_score"].mean())},
+                {"Dimension":"Research", "Field":"average_research_score", "Score":float(filtered["research_score"].mean())},
+                {"Dimension":"Financial", "Field":"average_financial_score", "Score":float(filtered["financial_score"].mean())},
+            ])
+            avg_profile["Focused"] = avg_profile["Field"].eq(overview_focus)
+            avg_bars = alt.Chart(avg_profile).mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4).encode(
+                y=alt.Y("Dimension:N", sort=None, title=None), x=alt.X("Score:Q", scale=alt.Scale(domain=[0,100])),
+                color=alt.condition("datum.Focused", alt.value("#111111"), alt.value("#4c78a8")),
+                stroke=alt.condition("datum.Focused", alt.value("#111111"), alt.value(None)),
+                strokeWidth=alt.condition("datum.Focused", alt.value(3), alt.value(0)),
+                tooltip=["Dimension", alt.Tooltip("Score:Q", format=".1f")])
+            avg_labels = alt.Chart(avg_profile).mark_text(align="left", dx=5).encode(y=alt.Y("Dimension:N", sort=None), x="Score:Q", text=alt.Text("Score:Q", format=".1f"))
+            st.altair_chart((avg_bars+avg_labels).properties(height=240), width="stretch")
             st.markdown("#### Average profile by macro-area")
             st.altair_chart(macro_chart, width="stretch")
 
@@ -1493,11 +1726,16 @@ with main_col:
         with c1:
             st.markdown("<div id='source-profile-dimensions'></div>", unsafe_allow_html=True)
             st.markdown("#### Performance profile")
-            st.altair_chart(score_bar_chart(make_score_profile(selected)), width="stretch")
+            profile_focus = page_focus_field("University Profile")
+            profile_df = make_score_profile(selected)
+            profile_dimension_selection = alt.selection_point(name="profile_dimension_selection", fields=["Field", "Label", "Value"], on="click", clear="dblclick")
+            profile_chart = score_bar_chart(profile_df, profile_focus).add_params(profile_dimension_selection)
+            st.caption("Click a dimension bar to focus the Analysis Companion on that dimension.")
+            st.altair_chart(profile_chart, key="profile_dimension_chart", on_select=on_profile_dimension_select, selection_mode=["profile_dimension_selection"], width="stretch")
         with c2:
             st.markdown("<div id='source-profile-benchmark'></div>", unsafe_allow_html=True)
             st.markdown("#### Benchmark comparison")
-            st.altair_chart(benchmark_chart(selected), width="stretch")
+            st.altair_chart(benchmark_chart(selected, page_focus_field("University Profile")), width="stretch")
 
         trend = df[df["university"] == university].sort_values("year")
         trend_long = trend.melt(
@@ -1560,9 +1798,12 @@ with main_col:
                 ("Research", "research_score"),
                 ("Financial", "financial_score"),
             ]:
-                comp_scores.append({"Dimension": label, "University": university_a, "Score": float(row_a[col])})
-                comp_scores.append({"Dimension": label, "University": university_b, "Score": float(row_b[col])})
+                comp_scores.append({"Dimension": label, "Label": label, "Field": col, "University": university_a, "Score": float(row_a[col]), "Value": float(row_a[col])})
+                comp_scores.append({"Dimension": label, "Label": label, "Field": col, "University": university_b, "Score": float(row_b[col]), "Value": float(row_b[col])})
             comp_scores_df = pd.DataFrame(comp_scores)
+            comparison_focus = page_focus_field("University Comparison")
+            comp_scores_df["Focused"] = comp_scores_df["Field"].eq(comparison_focus)
+            comparison_score_selection = alt.selection_point(name="comparison_score_selection", fields=["Field", "Dimension", "University", "Score"], on="click", clear="dblclick")
             comp_chart = (
                 alt.Chart(comp_scores_df)
                 .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
@@ -1571,10 +1812,18 @@ with main_col:
                     y=alt.Y("Score:Q", scale=alt.Scale(domain=[0, 100])),
                     xOffset="University:N",
                     color=alt.Color("University:N", title="University"),
-                    tooltip=["University", "Dimension", alt.Tooltip("Score:Q", format=".1f")],
+                    stroke=alt.condition("datum.Focused", alt.value("#111111"), alt.value(None)),
+                    strokeWidth=alt.condition("datum.Focused", alt.value(3), alt.value(0)),
+                    tooltip=["University", "Dimension", "Field", alt.Tooltip("Score:Q", format=".1f")],
                 )
+                .add_params(comparison_score_selection)
                 .properties(height=340)
             )
+
+            comp_labels = alt.Chart(comp_scores_df).mark_text(dy=-8, fontSize=10).encode(
+                x=alt.X("Dimension:N", sort=None), y="Score:Q", xOffset="University:N", text=alt.Text("Score:Q", format=".1f")
+            )
+            comp_chart = comp_chart + comp_labels
 
             gap_data = []
             for label, col in [
@@ -1588,11 +1837,15 @@ with main_col:
                 gap_data.append(
                     {
                         "Dimension": label,
+                        "Label": label,
+                        "Field": col,
                         "Gap": gap,
                         "Direction": f"{university_a} higher" if gap >= 0 else f"{university_b} higher",
                     }
                 )
             gap_df = pd.DataFrame(gap_data)
+            gap_df["Focused"] = gap_df["Field"].eq(comparison_focus)
+            comparison_gap_selection = alt.selection_point(name="comparison_gap_selection", fields=["Field", "Dimension", "Gap"], on="click", clear="dblclick")
             gap_chart = (
                 alt.Chart(gap_df)
                 .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
@@ -1600,18 +1853,28 @@ with main_col:
                     x=alt.X("Gap:Q", title=f"Score gap: {university_a} minus {university_b}"),
                     y=alt.Y("Dimension:N", sort=None, title="Dimension"),
                     color=alt.Color("Direction:N", title="Direction"),
-                    tooltip=["Dimension", alt.Tooltip("Gap:Q", format=".1f"), "Direction"],
+                    stroke=alt.condition("datum.Focused", alt.value("#111111"), alt.value(None)),
+                    strokeWidth=alt.condition("datum.Focused", alt.value(3), alt.value(0)),
+                    tooltip=["Dimension", "Field", alt.Tooltip("Gap:Q", format=".1f"), "Direction"],
                 )
+                .add_params(comparison_gap_selection)
                 .properties(height=340)
             )
+            gap_labels = alt.Chart(gap_df).mark_text(align="left", dx=5).encode(
+                x="Gap:Q", y=alt.Y("Dimension:N", sort=None), text=alt.Text("Gap:Q", format="+.1f")
+            )
+            gap_chart = gap_chart + gap_labels
+
             gc1, gc2 = st.columns(2)
             with gc1:
                 st.markdown("<div id='source-comparison-scores'></div>", unsafe_allow_html=True)
                 st.markdown("#### Side-by-side score profile")
-                st.altair_chart(comp_chart, width="stretch")
+                st.caption("Click a bar to focus the Companion on that university and dimension within the comparison.")
+                st.altair_chart(comp_chart, key="comparison_score_chart", on_select=on_comparison_score_select, selection_mode=["comparison_score_selection"], width="stretch")
             with gc2:
                 st.markdown("#### Score gaps")
-                st.altair_chart(gap_chart, width="stretch")
+                st.caption("Click a gap bar to focus the Companion on that difference.")
+                st.altair_chart(gap_chart, key="comparison_gap_chart", on_select=on_comparison_gap_select, selection_mode=["comparison_gap_selection"], width="stretch")
 
             trends = df[df["university"].isin([university_a, university_b])].sort_values(["university", "year"])
             trend_comp = (
@@ -1720,10 +1983,13 @@ with main_col:
             .mark_circle(size=260, fillOpacity=0, stroke="black", strokeWidth=3)
             .encode(x=alt.X(f"{x_col}:Q"), y=alt.Y(f"{y_col}:Q"), tooltip=["university"])
         )
+        scatter_data["selected_label_text"] = scatter_data.apply(
+            lambda r: f"{r['university']} | {finance_label}: {float(r[x_col]):,.2f} | {score_label_choice}: {float(r[y_col]):.1f}" if pd.notna(r.get(x_col)) and pd.notna(r.get(y_col)) else str(r["university"]), axis=1
+        )
         selected_label = (
             alt.Chart(scatter_data[scatter_data["selected_flag"]])
             .mark_text(align="left", dx=10, dy=-10, fontSize=12, fontWeight="bold")
-            .encode(x=alt.X(f"{x_col}:Q"), y=alt.Y(f"{y_col}:Q"), text="university:N")
+            .encode(x=alt.X(f"{x_col}:Q"), y=alt.Y(f"{y_col}:Q"), text="selected_label_text:N")
         )
         st.markdown("<div id='source-finance-scatter'></div>", unsafe_allow_html=True)
         st.markdown("#### Financial indicator vs selected score")
@@ -1751,7 +2017,10 @@ with main_col:
         }
         st.markdown("<div id='source-finance-indicators'></div>", unsafe_allow_html=True)
         st.markdown("#### Selected university financial structure")
-        st.altair_chart(make_indicator_bar(selected, finance_indicators), width="stretch")
+        finance_indicator_selection = alt.selection_point(name="finance_indicator_selection", fields=["Field", "Indicator", "Value"], on="click", clear="dblclick")
+        finance_indicator_chart = make_indicator_bar(selected, finance_indicators, page_focus_field("Finance Explorer")).add_params(finance_indicator_selection)
+        st.caption("Click a financial bar to focus the Companion on that indicator.")
+        st.altair_chart(finance_indicator_chart, key="finance_indicator_chart", on_select=on_finance_indicator_select, selection_mode=["finance_indicator_selection"], width="stretch")
 
 
     elif page == "DEA Efficiency Explorer":
@@ -1815,10 +2084,13 @@ with main_col:
                 .mark_circle(size=270, fillOpacity=0, stroke="black", strokeWidth=3)
                 .encode(x=alt.X(f"{dea_x_col}:Q"), y=alt.Y("dea_vrs_efficiency_100:Q"), tooltip=["university"])
             )
+            dea_data["selected_label_text"] = dea_data.apply(
+                lambda r: f"{r['university']} | {dea_x_label}: {float(r[dea_x_col]):,.2f} | DEA-VRS: {float(r['dea_vrs_efficiency_100']):.1f}" if pd.notna(r.get(dea_x_col)) and pd.notna(r.get("dea_vrs_efficiency_100")) else str(r["university"]), axis=1
+            )
             selected_dea_label = (
                 alt.Chart(dea_data[dea_data["selected_flag"]])
                 .mark_text(align="left", dx=10, dy=-10, fontSize=12, fontWeight="bold")
-                .encode(x=alt.X(f"{dea_x_col}:Q"), y=alt.Y("dea_vrs_efficiency_100:Q"), text="university:N")
+                .encode(x=alt.X(f"{dea_x_col}:Q"), y=alt.Y("dea_vrs_efficiency_100:Q"), text="selected_label_text:N")
             )
             st.markdown("<div id='source-dea-scatter'></div>", unsafe_allow_html=True)
             st.markdown("#### DEA efficiency vs selected variable")
@@ -1862,17 +2134,25 @@ with main_col:
             with dc2:
                 st.markdown("#### Top 10 by DEA-VRS efficiency")
                 top_dea = filtered.sort_values("dea_vrs_efficiency_100", ascending=False).head(10)
+                dea_top_university_selection = alt.selection_point(name="dea_top_university_selection", fields=["university"], on="click", clear="dblclick")
                 top_dea_chart = (
                     alt.Chart(top_dea)
                     .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
                     .encode(
                         x=alt.X("dea_vrs_efficiency_100:Q", title="DEA-VRS efficiency", scale=alt.Scale(domain=[0, 100])),
                         y=alt.Y("university:N", sort="-x", title=None),
+                        color=alt.condition(alt.datum.university == university, alt.value("#111111"), alt.value("#4c78a8")),
                         tooltip=["university", alt.Tooltip("dea_vrs_efficiency_100:Q", format=".1f"), "efficiency_category"],
                     )
+                    .add_params(dea_top_university_selection)
                     .properties(height=320)
                 )
-                st.altair_chart(top_dea_chart, width="stretch")
+                top_dea_labels = alt.Chart(top_dea).mark_text(align="left", dx=5).encode(
+                    x="dea_vrs_efficiency_100:Q", y=alt.Y("university:N", sort="-x"), text=alt.Text("dea_vrs_efficiency_100:Q", format=".1f")
+                )
+                top_dea_chart = top_dea_chart + top_dea_labels
+                st.caption("Click a university bar to make it the active selection.")
+                st.altair_chart(top_dea_chart, key="dea_top_chart", on_select=on_dea_top_select, selection_mode=["dea_top_university_selection"], width="stretch")
 
             st.markdown("#### DEA inputs and outputs for selected university")
             dea_table_cols = [
@@ -1937,6 +2217,7 @@ with main_col:
 
         rank_chart_data = ranked.head(top_n).copy()
         rank_chart_data["selected_flag"] = rank_chart_data["university"].eq(university)
+        ranking_university_selection = alt.selection_point(name="ranking_university_selection", fields=["university"], on="click", clear="dblclick")
         rank_chart = (
             alt.Chart(rank_chart_data)
             .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
@@ -1946,11 +2227,17 @@ with main_col:
                 color=alt.condition(alt.datum.selected_flag, alt.value("black"), alt.Color("macro_area:N", title="Macro-area")),
                 tooltip=["rank_current_filter", "university", "macro_area", alt.Tooltip(f"{ranking_col}:Q", title=ranking_metric_label, format=".1f")],
             )
+            .add_params(ranking_university_selection)
             .properties(height=max(330, 28 * len(rank_chart_data)))
         )
+        rank_labels = alt.Chart(rank_chart_data).mark_text(align="left", dx=5).encode(
+            x=alt.X(f"{ranking_col}:Q"), y=alt.Y("university:N", sort="-x"), text=alt.Text(f"{ranking_col}:Q", format=".1f")
+        )
+        rank_chart = rank_chart + rank_labels
         st.markdown("<div id='source-ranking-chart'></div>", unsafe_allow_html=True)
         st.markdown(f"#### Top {top_n} universities by {ranking_metric_label}")
-        st.altair_chart(rank_chart, width="stretch")
+        st.caption("Click a university bar to make it the active dashboard selection.")
+        st.altair_chart(rank_chart, key="ranking_bar_chart", on_select=on_ranking_bar_select, selection_mode=["ranking_university_selection"], width="stretch")
 
         show_cols = ["rank_current_filter", "university", "region", "macro_area", "size_class", ranking_col, "overall_score", "dea_vrs_efficiency_100"]
 
@@ -1992,6 +2279,8 @@ with main_col:
                 for col in change_cols:
                     change_rows.append({
                         "Dimension": col.replace("_score", "").replace("dea_vrs_efficiency_100", "DEA-VRS efficiency").replace("_", " ").title(),
+                        "Label": col.replace("_score", "").replace("dea_vrs_efficiency_100", "DEA-VRS efficiency").replace("_", " ").title(),
+                        "Field": col,
                         "Start": float(start_row[col]),
                         "End": float(end_row[col]),
                         "Change": float(end_row[col] - start_row[col]),
@@ -2006,19 +2295,30 @@ with main_col:
                 else:
                     tcards[3].metric("Financial change", f"{end_row['financial_score'] - start_row['financial_score']:+.1f}")
 
+                time_focus = page_focus_field("Time Dynamics / What Changed")
+                change_df["Focused"] = change_df["Field"].eq(time_focus)
+                time_change_selection = alt.selection_point(name="time_change_selection", fields=["Field", "Dimension", "Change"], on="click", clear="dblclick")
                 change_chart = (
                     alt.Chart(change_df)
                     .mark_bar(cornerRadiusTopRight=4, cornerRadiusBottomRight=4)
                     .encode(
                         x=alt.X("Change:Q", title=f"Change from {start_year} to {end_year}"),
                         y=alt.Y("Dimension:N", sort=None, title=None),
-                        color=alt.condition(alt.datum.Change >= 0, alt.value("#4c78a8"), alt.value("#e45756")),
-                        tooltip=["Dimension", alt.Tooltip("Start:Q", format=".1f"), alt.Tooltip("End:Q", format=".1f"), alt.Tooltip("Change:Q", format="+.1f")],
+                        color=alt.condition("datum.Focused", alt.value("#111111"), alt.value("#4c78a8")),
+                        stroke=alt.condition("datum.Focused", alt.value("#111111"), alt.value(None)),
+                        strokeWidth=alt.condition("datum.Focused", alt.value(3), alt.value(0)),
+                        tooltip=["Dimension", "Field", alt.Tooltip("Start:Q", format=".1f"), alt.Tooltip("End:Q", format=".1f"), alt.Tooltip("Change:Q", format="+.1f")],
                     )
+                    .add_params(time_change_selection)
                     .properties(height=330)
                 )
+                change_labels = alt.Chart(change_df).mark_text(align="left", dx=5).encode(
+                    x="Change:Q", y=alt.Y("Dimension:N", sort=None), text=alt.Text("Change:Q", format="+.1f")
+                )
+                change_chart = change_chart + change_labels
                 st.markdown("#### Change by dimension")
-                st.altair_chart(change_chart, width="stretch")
+                st.caption("Click a dimension bar to focus the Companion on that change.")
+                st.altair_chart(change_chart, key="time_change_chart", on_select=on_time_change_select, selection_mode=["time_change_selection"], width="stretch")
 
                 trend_df = df[df["university"].eq(university)].sort_values("year")
                 trend_cols = ["overall_score", "teaching_score", "placement_score", "research_score", "financial_score"]
@@ -2071,15 +2371,29 @@ with main_col:
             "highly_cited_researchers": "Highly cited researchers",
             "nature_science_articles": "Nature and Science articles",
         }
+        tr_focus = page_focus_field("Teaching and Research")
+        tr_score_df = make_score_profile(selected, include_overall=False)
+        tr_score_df = tr_score_df[tr_score_df["Field"].isin(["teaching_score", "placement_score", "research_score"])].copy()
+        teaching_research_score_selection = alt.selection_point(name="teaching_research_score_selection", fields=["Field", "Label", "Value"], on="click", clear="dblclick")
+        st.markdown("#### Teaching, placement and research scores")
+        st.caption("Click a score bar to focus the Companion on that dimension.")
+        st.altair_chart(score_bar_chart(tr_score_df, tr_focus).add_params(teaching_research_score_selection), key="teaching_research_score_chart", on_select=on_teaching_research_score_select, selection_mode=["teaching_research_score_selection"], width="stretch")
+
         tr1, tr2 = st.columns(2)
         with tr1:
             st.markdown("<div id='source-teaching-indicators'></div>", unsafe_allow_html=True)
             st.markdown("#### Teaching and placement indicators")
-            st.altair_chart(make_indicator_bar(selected, teaching_indicators), width="stretch")
+            teaching_indicator_selection = alt.selection_point(name="teaching_indicator_selection", fields=["Field", "Indicator", "Value"], on="click", clear="dblclick")
+            st.caption("Click an indicator bar to focus the Companion on it.")
+            st.altair_chart(make_indicator_bar(selected, teaching_indicators, tr_focus).add_params(teaching_indicator_selection), key="teaching_indicator_chart", on_select=on_teaching_indicator_select, selection_mode=["teaching_indicator_selection"], width="stretch")
         with tr2:
+            st.markdown("<div id='source-research-indicators'></div>", unsafe_allow_html=True)
             st.markdown("#### Research indicators")
-            st.altair_chart(make_indicator_bar(selected, research_indicators), width="stretch")
+            research_indicator_selection = alt.selection_point(name="research_indicator_selection", fields=["Field", "Indicator", "Value"], on="click", clear="dblclick")
+            st.caption("Click an indicator bar to focus the Companion on it.")
+            st.altair_chart(make_indicator_bar(selected, research_indicators, tr_focus).add_params(research_indicator_selection), key="research_indicator_chart", on_select=on_research_indicator_select, selection_mode=["research_indicator_selection"], width="stretch")
 
+        teaching_research_university_selection = alt.selection_point(name="teaching_research_university_selection", fields=["university"], on="click", clear="dblclick")
         teaching_research_scatter = (
             alt.Chart(filtered)
             .mark_circle(size=100, opacity=0.7)
@@ -2090,6 +2404,7 @@ with main_col:
                 size=alt.Size("enrolled_students:Q", title="Enrolled students"),
                 tooltip=["university", "region", alt.Tooltip("teaching_score:Q", format=".1f"), alt.Tooltip("research_score:Q", format=".1f")],
             )
+            .add_params(teaching_research_university_selection)
             .interactive()
         )
         selected_tr = (
@@ -2099,7 +2414,8 @@ with main_col:
         )
         st.markdown("<div id='source-teaching-research'></div>", unsafe_allow_html=True)
         st.markdown("#### Teaching vs research positioning")
-        st.altair_chart((teaching_research_scatter + selected_tr).properties(height=360), width="stretch")
+        st.caption("Click any university point to make it the active dashboard selection.")
+        st.altair_chart((teaching_research_scatter + selected_tr).properties(height=360), key="teaching_research_scatter_chart", on_select=on_teaching_research_scatter_select, selection_mode=["teaching_research_university_selection"], width="stretch")
 
     elif page == "Data and Methodology":
         active_context = {
@@ -2139,10 +2455,19 @@ if (
 ):
     active_context["interaction_selection"] = dict(chart_selection_meta)
 
+chart_focus_meta = st.session_state.get("chart_focus_meta") or {}
+if chart_focus_meta.get("source_page") == page:
+    active_context["interaction_focus"] = dict(chart_focus_meta)
+
 # Build the evidence registry after all page-specific controls have defined the active context.
 # This makes the dashboard -> Companion link explicit and keeps the evidence synchronized
 # with year, university, filters, selected axes, ranking metric, and comparison choices.
 active_context["evidence_items"] = build_evidence_items(active_context)
+_focus_field = current_focus_field()
+if _focus_field:
+    _focused_item = next((item for item in active_context["evidence_items"] if item.get("field") == _focus_field), None)
+    if _focused_item:
+        active_context["evidence_focus"] = {k: _focused_item.get(k) for k in ["id", "label", "value", "display_value", "source", "field", "anchor"]}
 
 with ai_col:
     st.subheader("AI Analysis Companion")
@@ -2201,9 +2526,18 @@ with ai_col:
     interaction_selection = active_context.get("interaction_selection")
     if interaction_selection:
         st.caption(
-            f"Interactive selection source: {interaction_selection.get('source_page')} scatterplot → "
+            f"Interactive selection source: {interaction_selection.get('source_page')} → "
             f"{interaction_selection.get('university')}. The Companion is analyzing the chart-selected observation."
         )
+    interaction_focus = active_context.get("interaction_focus")
+    if interaction_focus:
+        st.caption(
+            f"Interactive focus: {interaction_focus.get('label') or interaction_focus.get('field')} "
+            f"({interaction_focus.get('value')}). The Companion prioritizes the clicked bar/indicator."
+        )
+    if active_context.get("evidence_focus"):
+        ef = active_context["evidence_focus"]
+        st.caption(f"Evidence focus: {ef.get('label')} = {ef.get('display_value')}. The linked visual mark is highlighted in black.")
 
     with st.expander("Linked data from current view", expanded=False):
         evidence_df = pd.DataFrame(active_context.get("evidence_items", []))
@@ -2250,7 +2584,8 @@ with ai_col:
                 st.session_state.ai_answer = generate_ai_interpretation(active_context, question.strip())
 
     if st.session_state.ai_answer:
-        linked_answer = linkify_evidence_citations(st.session_state.ai_answer, active_context.get("evidence_items", []))
+        linked_answer = linkify_evidence_values(st.session_state.ai_answer, active_context.get("evidence_items", []))
+        linked_answer = linkify_evidence_citations(linked_answer, active_context.get("evidence_items", []))
         st.markdown(linked_answer)
         render_evidence_registry(active_context.get("evidence_items", []), st.session_state.ai_answer)
 
