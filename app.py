@@ -69,6 +69,20 @@ st.markdown(
         border-bottom: 3px solid rgba(49, 51, 63, 0.55);
         padding: 0 0.15rem;
     }
+    .companion-data-link,
+    .companion-evidence-link {
+        color: inherit;
+        text-decoration: underline;
+        text-decoration-thickness: 2px;
+        text-underline-offset: 2px;
+        cursor: pointer;
+        font-weight: 700;
+    }
+    .companion-data-link:hover,
+    .companion-evidence-link:hover {
+        background: rgba(255, 232, 128, 0.45);
+        border-radius: 4px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -817,14 +831,24 @@ def extract_evidence_ids(answer: str, evidence_items: list[dict]) -> list[str]:
 
 
 def linkify_evidence_citations(answer: str, evidence_items: list[dict]) -> str:
-    anchors = {item["id"]: item.get("anchor", "source-current-view") for item in evidence_items}
+    """Render evidence IDs as same-tab links to the dashboard source.
+
+    Raw HTML anchors are used instead of Markdown links because Streamlit may open
+    Markdown links in a new browser tab. target="_self" keeps navigation inside
+    the current dashboard tab.
+    """
+    item_map = {item["id"]: item for item in evidence_items}
 
     def repl(match: re.Match) -> str:
         evidence_id = match.group(1)
-        anchor = anchors.get(evidence_id)
-        if not anchor:
+        item = item_map.get(evidence_id)
+        if not item:
             return match.group(0)
-        return f"[{evidence_id}](#{anchor})"
+        url = html.escape(evidence_deep_link(item), quote=True)
+        return (
+            f"<a class='companion-evidence-link' href='{url}' target='_self' "
+            f"title='Show this evidence in the dashboard'>[{evidence_id}]</a>"
+        )
 
     return re.sub(r"\[(E\d+)\]", repl, answer or "")
 
@@ -835,8 +859,19 @@ def evidence_deep_link(item: dict) -> str:
     return f"?focus_field={field}#{anchor}"
 
 
+def _same_tab_value_link(display: str, item: dict) -> str:
+    """Create an inline evidence value link that stays in the current browser tab."""
+    url = html.escape(evidence_deep_link(item), quote=True)
+    safe_display = html.escape(display)
+    label = html.escape(str(item.get("label", "dashboard evidence")), quote=True)
+    return (
+        f"<a class='companion-data-link' href='{url}' target='_self' "
+        f"title='Show {label} in the dashboard'>{safe_display}</a>"
+    )
+
+
 def linkify_evidence_values(answer: str, evidence_items: list[dict]) -> str:
-    """Turn evidence-backed numeric values in Companion prose into deep links to their visual source."""
+    """Turn evidence-backed numeric values in Companion prose into same-tab deep links."""
     result = answer or ""
     numeric_items = [item for item in evidence_items if item.get("value") is not None and not isinstance(item.get("value"), str)]
 
@@ -845,10 +880,9 @@ def linkify_evidence_values(answer: str, evidence_items: list[dict]) -> str:
         display = str(item.get("display_value", ""))
         if not display:
             continue
-        url = evidence_deep_link(item)
         eid = re.escape(str(item.get("id", "")))
         pattern = rf"(?<![\w\[]){re.escape(display)}(?![\w\]])(?=[^\n]{{0,80}}\[{eid}\])"
-        result = re.sub(pattern, f"[{display}]({url})", result)
+        result = re.sub(pattern, lambda _m, d=display, it=item: _same_tab_value_link(d, it), result)
 
     # Then link values that are unique in the evidence registry even if the model placed the evidence ID farther away.
     counts: dict[str, int] = {}
@@ -859,9 +893,11 @@ def linkify_evidence_values(answer: str, evidence_items: list[dict]) -> str:
         display = str(item.get("display_value", ""))
         if not display or counts.get(display) != 1:
             continue
-        url = evidence_deep_link(item)
         pattern = rf"(?<![\w\[]){re.escape(display)}(?![\w\]])"
-        result = re.sub(pattern, f"[{display}]({url})", result)
+        # Avoid replacing a value that is already inside one of our HTML anchors.
+        if f">{html.escape(display)}<" in result:
+            continue
+        result = re.sub(pattern, lambda _m, d=display, it=item: _same_tab_value_link(d, it), result)
     return result
 
 
@@ -940,7 +976,7 @@ def render_evidence_registry(evidence_items: list[dict], answer: str = "") -> No
         deep_link = evidence_deep_link(item)
         st.markdown(
             f"<div class='evidence-card'><span class='evidence-id'>{item['id']}</span>"
-            f"<b>{label}</b><br><a href='{deep_link}'><span class='focus-value'>{value}</span></a><br>"
+            f"<b>{label}</b><br><a href='{deep_link}' target='_self'><span class='focus-value'>{value}</span></a><br>"
             f"<span class='small-note'>Source: {source} · field: {field}</span></div>",
             unsafe_allow_html=True,
         )
@@ -2586,7 +2622,7 @@ with ai_col:
     if st.session_state.ai_answer:
         linked_answer = linkify_evidence_values(st.session_state.ai_answer, active_context.get("evidence_items", []))
         linked_answer = linkify_evidence_citations(linked_answer, active_context.get("evidence_items", []))
-        st.markdown(linked_answer)
+        st.markdown(linked_answer, unsafe_allow_html=True)
         render_evidence_registry(active_context.get("evidence_items", []), st.session_state.ai_answer)
 
     with st.expander("Current AI input"):
