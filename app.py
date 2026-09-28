@@ -247,9 +247,19 @@ def _sync_chart_selection_to_sidebar(chart_key: str, selection_name: str, source
 
 
 def _sync_chart_focus(chart_key: str, selection_name: str, source_page: str, field_name: str = "Field", label_name: str = "Label", value_name: str = "Value") -> None:
-    """Focus the Companion and visualization on a clicked dimension/indicator bar."""
+    """Focus the Companion and visualization on a clicked dimension/indicator bar.
+
+    Clearing the Altair selection also clears the analytical focus, so the
+    Companion returns to page-level analysis only when the user explicitly
+    removes the mark selection.
+    """
     field = extract_chart_selection_field(chart_key, selection_name, field_name)
     if not field:
+        existing = st.session_state.get("chart_focus_meta") or {}
+        if existing.get("source_page") == source_page:
+            st.session_state["chart_focus_meta"] = None
+            st.session_state["ai_answer"] = ""
+            st.session_state["last_ai_signature"] = ""
         return
     label = extract_chart_selection_field(chart_key, selection_name, label_name)
     value = extract_chart_selection_field(chart_key, selection_name, value_name)
@@ -1030,13 +1040,23 @@ def build_evidence_items(context: dict) -> list[dict]:
         a = context["university_a"]
         b = context["university_b"]
         gaps = context.get("score_gaps_a_minus_b", {})
-        add(f"{a.get('university')} overall score", a.get("overall_score"), "Comparison summary", "university_a.overall_score", "source-comparison-summary", 1)
-        add(f"{b.get('university')} overall score", b.get("overall_score"), "Comparison summary", "university_b.overall_score", "source-comparison-summary", 1)
-        add("Overall score gap (A-B)", gaps.get("overall_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.overall_gap_a_minus_b", "source-comparison-scores", 1)
-        add("Teaching score gap (A-B)", gaps.get("teaching_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.teaching_gap_a_minus_b", "source-comparison-scores", 1)
-        add("Placement score gap (A-B)", gaps.get("placement_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.placement_gap_a_minus_b", "source-comparison-scores", 1)
-        add("Research score gap (A-B)", gaps.get("research_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.research_gap_a_minus_b", "source-comparison-scores", 1)
-        add("Financial score gap (A-B)", gaps.get("financial_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.financial_gap_a_minus_b", "source-comparison-scores", 1)
+        # Keep the individual A/B dimension scores in the evidence registry, not
+        # only the gaps. This lets a clicked bar such as "Bari — Placement" be
+        # cited and linked directly by the Companion.
+        for dim_label, col in [
+            ("Overall", "overall_score"),
+            ("Teaching", "teaching_score"),
+            ("Placement", "placement_score"),
+            ("Research", "research_score"),
+            ("Financial", "financial_score"),
+        ]:
+            add(f"{a.get('university')} {dim_label.lower()} score", a.get(col), "Side-by-side score profile", f"university_a.{col}", "source-comparison-scores", 1)
+            add(f"{b.get('university')} {dim_label.lower()} score", b.get(col), "Side-by-side score profile", f"university_b.{col}", "source-comparison-scores", 1)
+        add("Overall score gap (A-B)", gaps.get("overall_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.overall_gap_a_minus_b", "source-comparison-gaps", 1)
+        add("Teaching score gap (A-B)", gaps.get("teaching_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.teaching_gap_a_minus_b", "source-comparison-gaps", 1)
+        add("Placement score gap (A-B)", gaps.get("placement_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.placement_gap_a_minus_b", "source-comparison-gaps", 1)
+        add("Research score gap (A-B)", gaps.get("research_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.research_gap_a_minus_b", "source-comparison-gaps", 1)
+        add("Financial score gap (A-B)", gaps.get("financial_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.financial_gap_a_minus_b", "source-comparison-gaps", 1)
 
     elif view == "Finance Explorer":
         add(context.get("finance_x_axis", "Selected financial indicator"), context.get("selected_x_value"), "Selected scatterplot point", "selected_x_value", "source-finance-scatter", 2)
@@ -1047,8 +1067,13 @@ def build_evidence_items(context: dict) -> list[dict]:
         add("Y-axis percentile in current filter", context.get("y_axis_percentile_current_filter"), "Finance scatterplot position", "y_axis_percentile_current_filter", "source-finance-scatter", 0, "th percentile")
         add("FFO per student", context.get("ffo_per_student"), "Finance summary cards", "ffo_per_student", "source-finance-summary", 0)
         add("Operating cost per student", context.get("operating_cost_per_student"), "Finance summary cards", "operating_cost_per_student", "source-finance-summary", 0)
-        add("Personnel cost share", context.get("personnel_cost_share"), "Finance summary cards", "personnel_cost_share", "source-finance-summary", 2)
-        add("Public revenue share", context.get("public_revenue_share"), "Finance summary cards", "public_revenue_share", "source-finance-summary", 2)
+        add("Financial score", context.get("financial_score"), "Finance summary cards", "financial_score", "source-finance-summary", 1)
+        add("Overall score", context.get("overall_score"), "Finance summary cards", "overall_score", "source-finance-summary", 1)
+        add("Personnel cost share", context.get("personnel_cost_share"), "Financial structure", "personnel_cost_share", "source-finance-indicators", 2)
+        add("Public revenue share", context.get("public_revenue_share"), "Financial structure", "public_revenue_share", "source-finance-indicators", 2)
+        add("Student contribution share", context.get("student_contribution_share"), "Financial structure", "student_contribution_share", "source-finance-indicators", 2)
+        add("Performance quota share", context.get("performance_quota_share"), "Financial structure", "performance_quota_share", "source-finance-indicators", 2)
+        add("Economic-financial sustainability index", context.get("economic_financial_sustainability_index"), "Financial structure", "economic_financial_sustainability_index", "source-finance-indicators", 2)
 
     elif view == "DEA Efficiency Explorer":
         add("DEA-VRS efficiency", context.get("dea_vrs_efficiency_100"), "DEA summary", "dea_vrs_efficiency_100", "source-dea-summary", 1)
@@ -1085,7 +1110,15 @@ def build_evidence_items(context: dict) -> list[dict]:
         add("Teaching percentile in current filter", context.get("teaching_score_percentile_current_filter"), "Teaching vs research positioning", "teaching_score_percentile_current_filter", "source-teaching-research", 0, "th percentile")
         add("Research percentile in current filter", context.get("research_score_percentile_current_filter"), "Teaching vs research positioning", "research_score_percentile_current_filter", "source-teaching-research", 0, "th percentile")
         add("Second-year retention", context.get("second_year_retention_pct"), "Teaching indicators", "second_year_retention_pct", "source-teaching-indicators", 1, "%")
+        add("Inactive students reversed score", context.get("inactive_students_reversed_score"), "Teaching indicators", "inactive_students_reversed_score", "source-teaching-indicators", 1)
+        add("Graduation within standard duration", context.get("graduation_within_standard_pct"), "Teaching indicators", "graduation_within_standard_pct", "source-teaching-indicators", 1, "%")
+        add("Graduation intensity", context.get("graduation_intensity"), "Teaching indicators", "graduation_intensity", "source-teaching-indicators", 2)
+        add("Employment index", context.get("employment_index"), "Teaching indicators", "employment_index", "source-teaching-indicators", 1)
         add("Publications per teaching staff", context.get("publications_per_teaching_staff"), "Research indicators", "publications_per_teaching_staff", "source-research-indicators", 2)
+        add("Citations per publication", context.get("citations_per_publication"), "Research indicators", "citations_per_publication", "source-research-indicators", 2)
+        add("H-index", context.get("h_index"), "Research indicators", "h_index", "source-research-indicators", 1)
+        add("Highly cited researchers", context.get("highly_cited_researchers"), "Research indicators", "highly_cited_researchers", "source-research-indicators", 1)
+        add("Nature and Science articles", context.get("nature_science_articles"), "Research indicators", "nature_science_articles", "source-research-indicators", 1)
 
     elif view == "Data and Methodology":
         add("Dataset scope", context.get("dataset_scope"), "Data and Methodology", "dataset_scope", "source-methodology")
@@ -1835,7 +1868,271 @@ DEA results depend on the selected inputs and outputs. The score is a descriptiv
 """
 
 
+def build_focus_details(context: dict) -> dict | None:
+    """Create a compact, page-specific description of the clicked visual mark.
+
+    The raw chart callback tells us which field/bar was clicked. This helper adds
+    the comparison values needed for a genuinely focused Companion response.
+    """
+    focus = context.get("interaction_focus") or {}
+    if not focus:
+        return None
+
+    field = str(focus.get("field") or "")
+    label = str(focus.get("label") or field)
+    value = focus.get("value")
+    view = context.get("view_type")
+    details: dict[str, Any] = {
+        "mode": "clicked_mark",
+        "view_type": view,
+        "field": field,
+        "label": label,
+        "clicked_value": value,
+        "interaction": focus.get("interaction"),
+    }
+
+    score_labels = {
+        "overall_score": "Overall",
+        "teaching_score": "Teaching",
+        "placement_score": "Placement",
+        "research_score": "Research",
+        "financial_score": "Financial",
+    }
+
+    if view == "University Comparison" and context.get("university_a") and context.get("university_b"):
+        a = context["university_a"]
+        b = context["university_b"]
+        if field in score_labels:
+            a_val = clean_value(a.get(field))
+            b_val = clean_value(b.get(field))
+            gap = None
+            try:
+                gap = float(a.get(field)) - float(b.get(field))
+            except Exception:
+                pass
+            details.update({
+                "dimension": score_labels[field],
+                "university_a": a.get("university"),
+                "university_b": b.get("university"),
+                "value_a": a_val,
+                "value_b": b_val,
+                "gap_a_minus_b": gap,
+                "clicked_university": focus.get("university"),
+                "overall_gap_a_minus_b": context.get("score_gaps_a_minus_b", {}).get("overall_gap_a_minus_b"),
+            })
+        return details
+
+    if view == "University Profile":
+        if field in score_labels:
+            details.update({
+                "dimension": score_labels[field],
+                "university": context.get("university"),
+                "value": context.get(field),
+                "overall_score": context.get("overall_score"),
+                "national_avg_overall_score": context.get("national_avg_overall_score"),
+                "macro_area_avg_overall_score": context.get("macro_area_avg_overall_score"),
+                "profile_dispersion": context.get("profile_dispersion"),
+            })
+        return details
+
+    if view == "Finance Explorer":
+        details.update({
+            "university": context.get("university"),
+            "value": context.get(field, value),
+            "financial_score": context.get("financial_score"),
+            "overall_score": context.get("overall_score"),
+            "finance_x_axis": context.get("finance_x_axis"),
+            "score_y_axis": context.get("score_y_axis"),
+            "x_axis_median_current_filter": context.get("x_axis_median_current_filter"),
+            "y_axis_median_current_filter": context.get("y_axis_median_current_filter"),
+        })
+        return details
+
+    if view == "Teaching and Research":
+        details.update({
+            "university": context.get("university"),
+            "value": context.get(field, value),
+            "teaching_score": context.get("teaching_score"),
+            "placement_score": context.get("placement_score"),
+            "research_score": context.get("research_score"),
+        })
+        return details
+
+    if view == "Time Dynamics / What Changed":
+        starts = context.get("start_values", {})
+        ends = context.get("end_values", {})
+        changes = context.get("changes_end_minus_start", {})
+        details.update({
+            "university": context.get("university"),
+            "start_year": context.get("start_year"),
+            "end_year": context.get("end_year"),
+            "start_value": starts.get(field),
+            "end_value": ends.get(field),
+            "change": changes.get(field, value),
+        })
+        return details
+
+    if view == "Overview":
+        details.update({"year": context.get("year"), "number_of_universities": context.get("number_of_universities")})
+        return details
+
+    if view == "DEA Efficiency Explorer":
+        details.update({
+            "university": context.get("university"),
+            "value": context.get(field, value),
+            "dea_vrs_efficiency_100": context.get("dea_vrs_efficiency_100"),
+            "dea_crs_efficiency_100": context.get("dea_crs_efficiency_100"),
+            "dea_scale_efficiency_100": context.get("dea_scale_efficiency_100"),
+            "overall_score": context.get("overall_score"),
+        })
+        return details
+
+    if view == "Ranking Explorer":
+        details.update({
+            "university": context.get("university"),
+            "metric": context.get("metric"),
+            "selected_value": context.get("selected_value"),
+            "rank": context.get("selected_rank_in_current_filter"),
+            "percentile": context.get("selected_percentile_current_filter"),
+        })
+        return details
+
+    return details
+
+
+def local_focused_interpretation(context: dict, user_question: str | None = None) -> str:
+    """Short interpretation of the exact bar/indicator the user clicked."""
+    focus = context.get("focus_details") or build_focus_details(context) or {}
+    view = context.get("view_type")
+    label = focus.get("label") or focus.get("field") or "selected mark"
+    clicked = focus.get("clicked_value")
+    q = f"\n\n**User question**\n\n{user_question}" if user_question else ""
+
+    if view == "University Comparison" and focus.get("dimension"):
+        a_name, b_name = focus.get("university_a"), focus.get("university_b")
+        a_val, b_val = focus.get("value_a"), focus.get("value_b")
+        gap = focus.get("gap_a_minus_b")
+        clicked_uni = focus.get("clicked_university")
+        dim = focus.get("dimension")
+        if gap is not None:
+            higher = a_name if gap >= 0 else b_name
+            lower = b_name if gap >= 0 else a_name
+            gap_sentence = f"**{higher}** is higher than **{lower}** by **{abs(float(gap)):.1f} points** in this dimension."
+        else:
+            gap_sentence = "The dimension gap could not be calculated from the current context."
+        selected_sentence = (
+            f"You clicked **{clicked_uni} — {dim}**" + (f" at **{float(clicked):.1f}**." if isinstance(clicked, (int, float)) else ".")
+            if clicked_uni else f"You clicked the **{dim}** comparison gap."
+        )
+        return f"""
+**Focused analysis — {label}**
+
+{selected_sentence} In the same year, **{a_name}** has **{format_number(a_val, 1)}** and **{b_name}** has **{format_number(b_val, 1)}** for **{dim.lower()}**. {gap_sentence}
+
+**What this specific difference means**
+
+This mark should be read as a dimension-specific difference, not as a general statement that one university is better overall. Compare it with the overall gap of **{format_number(focus.get('overall_gap_a_minus_b'), 1)} points**: if the {dim.lower()} gap is larger in absolute terms, this dimension is an important contributor to the overall separation; if it is smaller, other dimensions explain more of the overall difference.
+
+**What to inspect next**
+
+Check whether the same {dim.lower()} difference persists over time. A persistent gap is a stronger descriptive pattern than a one-year difference.
+
+**Limit**
+
+This is a focused descriptive comparison of the clicked mark; it does not explain its cause.{q}
+"""
+
+    if view == "University Profile":
+        return f"""
+**Focused analysis — {label}**
+
+You selected **{label} = {format_number(focus.get('value', clicked), 1)}** for **{focus.get('university')}**. The university's overall score is **{format_number(focus.get('overall_score'), 1)}**, so the clicked dimension should be interpreted as one component of the multidimensional profile rather than as a standalone ranking.
+
+**Interpretation of the clicked dimension**
+
+A value above the overall score indicates that this dimension strengthens the profile; a value below it indicates a comparatively weaker component. The profile dispersion is **{format_number(focus.get('profile_dispersion'), 1)}**, which shows how unevenly the four dimensions are distributed.
+
+**What to inspect next**
+
+Open **Why this score?** for the selected dimension to see which normalized indicators contribute to it, then compare the same dimension with the selected benchmark group.
+
+**Limit**
+
+The clicked score is a normalized dashboard profile measure, not a causal estimate.{q}
+"""
+
+    if view == "Finance Explorer":
+        return f"""
+**Focused analysis — {label}**
+
+You selected **{label} = {format_number(focus.get('value', clicked), 2)}** for **{focus.get('university')}**. The financial score is **{format_number(focus.get('financial_score'), 1)}**, while the overall profile score is **{format_number(focus.get('overall_score'), 1)}**.
+
+**Interpretation of this indicator**
+
+This financial variable describes one part of the university's resource or financial structure. It should not be read as a direct cause of the financial or overall score. Its meaning is strongest when compared with the current filtered distribution and with other financial indicators rather than in isolation.
+
+**What to inspect next**
+
+Use this indicator on the Finance scatterplot x-axis, then compare the selected university with the current-filter median. That shows whether the clicked value is typical or distinctive within the active comparison group.
+
+**Limit**
+
+The relationship shown here is descriptive and associative, not causal.{q}
+"""
+
+    if view == "Teaching and Research":
+        return f"""
+**Focused analysis — {label}**
+
+You selected **{label} = {format_number(focus.get('value', clicked), 2)}** for **{focus.get('university')}**. In the same profile, Teaching is **{format_number(focus.get('teaching_score'), 1)}**, Placement is **{format_number(focus.get('placement_score'), 1)}**, and Research is **{format_number(focus.get('research_score'), 1)}**.
+
+**Interpretation of the clicked mark**
+
+The selected value should be interpreted inside its relevant dimension. An individual teaching or research indicator helps explain the composite score, but it does not determine that score by itself. If the clicked mark is one of the three composite scores, its difference from the other two indicates the university's academic orientation in this dashboard view.
+
+**What to inspect next**
+
+Compare the clicked indicator with the other indicators in the same block and then use the Teaching vs Research positioning chart to see whether this profile is common or distinctive.
+
+**Limit**
+
+This is descriptive profile analysis and does not identify causes of the observed difference.{q}
+"""
+
+    if view == "Time Dynamics / What Changed":
+        return f"""
+**Focused analysis — {label}**
+
+You selected the change in **{label}** for **{focus.get('university')}**. It moved from **{format_number(focus.get('start_value'), 1)}** in **{focus.get('start_year')}** to **{format_number(focus.get('end_value'), 1)}** in **{focus.get('end_year')}**, a change of **{format_number(focus.get('change'), 1)} points**.
+
+**Interpretation of this change**
+
+This is the exact temporal movement represented by the clicked bar. It should be compared with changes in the other dimensions to determine whether the university changed broadly or whether the movement was concentrated in this one area.
+
+**Limit**
+
+The chart describes change between observed years; it does not explain what caused that change.{q}
+"""
+
+    # Generic focused mode for other interactive charts / Explain-this-visual requests.
+    return f"""
+**Focused analysis — {label}**
+
+You selected **{label}**{f' = **{clicked}**' if clicked not in (None, 'current visual') else ''}. The Companion is now prioritizing this exact visual mark rather than summarizing the whole **{view}** page.
+
+**Interpretation**
+
+Read this mark in relation to the surrounding observations and the active filters. The selected value is descriptive evidence within the current analytical context; it should not be treated as an isolated quality judgment or causal result.
+
+**Next step**
+
+Compare the selected mark with its closest benchmark or neighboring observations in the same visualization.{q}
+"""
+
+
 def generate_local_interpretation(context: dict, user_question: str | None = None) -> str:
+    if context.get("focus_mode") and context.get("interaction_focus"):
+        return local_focused_interpretation(context, user_question)
     view_type = context.get("view_type")
     if view_type == "Overview":
         return local_overview_interpretation(context, user_question)
@@ -1887,7 +2184,11 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
             "The context contains an evidence_items registry. For every key quantitative or comparative claim, append one or more evidence IDs in square brackets, for example [E1] or [E2][E3]. Use only IDs that exist in evidence_items.",
             "Evidence IDs are not decorative citations: each one links the explanation back to the visible dashboard section from which the value came.",
             "If interaction_selection is present, treat the chart-clicked university as the explicit user-selected observation and keep the interpretation grounded in that selected mark.",
-            "If interaction_focus is present, prioritize the clicked dimension or indicator and explain it in the context of the current page without losing the broader profile.",
+            "If focus_mode is true and interaction_focus is present, switch to FOCUSED MODE. Do not give the normal page-wide overview. Start with the heading 'Focused analysis — <clicked label>'. The first sentence must name the exact clicked mark and value. At least 70% of the answer must interpret that selected dimension/indicator/visual, using focus_details. Mention broader page context only when it helps explain the selected mark.",
+            "In FOCUSED MODE on University Comparison, compare only the clicked dimension for the two selected universities first, state both values and the exact A-minus-B gap, then explain whether that dimension contributes strongly or weakly to the overall gap. Do not repeat a generic comparison-page summary.",
+            "In FOCUSED MODE on Finance Explorer or Teaching and Research, explain the selected indicator and how it relates to the relevant composite profile; do not turn one indicator into a causal explanation.",
+            "In FOCUSED MODE on Time Dynamics, explain the selected dimension's start value, end value, and change before discussing anything else.",
+            "Keep focused-mode responses concise (roughly 120-180 words) and omit generic sections that are unrelated to the clicked mark.",
             "If evidence_focus is present, explicitly address that evidence item because the user clicked its number in the previous Companion explanation.",
             "Explain what the pattern means for the current page: profile shape, trade-offs, benchmark position, specialization, outlier behavior, or balance between dimensions.",
             "Use phrases such as: this suggests, this indicates, this points to, this should be read as, but do not state causality.",
@@ -2506,6 +2807,7 @@ with main_col:
                 st.altair_chart(comp_chart, key="comparison_score_chart", on_select=on_comparison_score_select, selection_mode=["comparison_score_selection"], width="stretch")
                 request_visual_explanation("University Comparison", "Side-by-side score profile", "visual::comparison_scores", "explain_comparison_scores")
             with gc2:
+                st.markdown("<div id='source-comparison-gaps'></div>", unsafe_allow_html=True)
                 st.markdown("#### Score gaps")
                 st.caption("Click a gap bar to focus the Companion on that difference.")
                 st.altair_chart(gap_chart, key="comparison_gap_chart", on_select=on_comparison_gap_select, selection_mode=["comparison_gap_selection"], width="stretch")
@@ -3168,6 +3470,10 @@ if (
 chart_focus_meta = st.session_state.get("chart_focus_meta") or {}
 if chart_focus_meta.get("source_page") == page:
     active_context["interaction_focus"] = dict(chart_focus_meta)
+    active_context["focus_mode"] = True
+    focus_details = build_focus_details(active_context)
+    if focus_details:
+        active_context["focus_details"] = focus_details
 
 # Build the evidence registry after all page-specific controls have defined the active context.
 # This makes the dashboard -> Companion link explicit and keeps the evidence synchronized
@@ -3231,9 +3537,9 @@ with ai_col:
         )
     interaction_focus = active_context.get("interaction_focus")
     if interaction_focus:
-        st.caption(
-            f"Interactive focus: {interaction_focus.get('label') or interaction_focus.get('field')} "
-            f"({interaction_focus.get('value')}). The Companion prioritizes this visual/indicator."
+        st.info(
+            f"Focused mode: {interaction_focus.get('label') or interaction_focus.get('field')} "
+            f"({interaction_focus.get('value')}). The Companion will analyze this clicked mark instead of summarizing the whole page."
         )
     if active_context.get("evidence_focus"):
         ef = active_context["evidence_focus"]
