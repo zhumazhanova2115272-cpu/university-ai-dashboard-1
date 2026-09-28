@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import html
+import re
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,25 @@ st.markdown(
         padding: 1rem;
         background: rgba(250, 250, 250, 0.65);
     }
+    .evidence-card {
+        border: 1px solid rgba(49, 51, 63, 0.14);
+        border-radius: 10px;
+        padding: 0.72rem 0.85rem;
+        margin: 0.45rem 0;
+        background: rgba(250, 250, 250, 0.72);
+    }
+    .evidence-id {
+        display: inline-block;
+        min-width: 2.2rem;
+        font-weight: 700;
+    }
+    .context-link-note {
+        border-left: 3px solid rgba(49, 51, 63, 0.35);
+        padding-left: 0.75rem;
+        margin: 0.25rem 0 0.8rem 0;
+        color: #5b606b;
+        font-size: 0.9rem;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -54,6 +75,82 @@ def clean_value(value: Any) -> Any:
     if isinstance(value, (int, float, str, bool)):
         return value
     return str(value)
+
+
+def _mapping_get(value: Any, key: str, default: Any = None) -> Any:
+    """Read from dict-like Streamlit event objects without depending on one version."""
+    if value is None:
+        return default
+    try:
+        return value.get(key, default)
+    except Exception:
+        return getattr(value, key, default)
+
+
+def extract_chart_selected_university(chart_key: str, selection_name: str) -> str | None:
+    """Extract the university field from a Streamlit/Vega-Lite point-selection state."""
+    chart_state = st.session_state.get(chart_key)
+    selection_state = _mapping_get(chart_state, "selection", {})
+    payload = _mapping_get(selection_state, selection_name)
+    if not payload:
+        return None
+
+    if isinstance(payload, (list, tuple)):
+        for item in reversed(payload):
+            candidate = _mapping_get(item, "university")
+            if isinstance(candidate, (list, tuple)):
+                candidate = candidate[-1] if candidate else None
+            if candidate:
+                return str(candidate)
+        return None
+
+    candidate = _mapping_get(payload, "university")
+    if isinstance(candidate, (list, tuple)):
+        candidate = candidate[-1] if candidate else None
+    return str(candidate) if candidate else None
+
+
+def _sync_chart_selection_to_sidebar(chart_key: str, selection_name: str, source_page: str) -> None:
+    """Make a clicked chart point the active university for the entire dashboard."""
+    clicked_university = extract_chart_selected_university(chart_key, selection_name)
+    if not clicked_university:
+        return
+
+    valid_options = st.session_state.get("_current_university_options", [])
+    if valid_options and clicked_university not in valid_options:
+        return
+
+    st.session_state["university_selector"] = clicked_university
+    st.session_state["chart_selection_meta"] = {
+        "university": clicked_university,
+        "source_page": source_page,
+        "interaction": "chart point click",
+    }
+    st.session_state["ai_answer"] = ""
+    st.session_state["last_ai_signature"] = ""
+
+
+def on_finance_scatter_select() -> None:
+    _sync_chart_selection_to_sidebar(
+        "finance_scatter_chart",
+        "finance_point_selection",
+        "Finance Explorer",
+    )
+
+
+def on_dea_scatter_select() -> None:
+    _sync_chart_selection_to_sidebar(
+        "dea_scatter_chart",
+        "dea_point_selection",
+        "DEA Efficiency Explorer",
+    )
+
+
+def on_sidebar_university_change() -> None:
+    """A manual sidebar choice supersedes the previous chart-origin selection."""
+    st.session_state["chart_selection_meta"] = None
+    st.session_state["ai_answer"] = ""
+    st.session_state["last_ai_signature"] = ""
 
 
 def format_number(value: Any, decimals: int = 1) -> str:
@@ -469,6 +566,183 @@ def make_dea_context(filtered_data: pd.DataFrame, selected_row: pd.Series) -> di
             context[f"{col}_percentile_current_filter"] = clean_value(percentile_position(filtered_data, col, selected_row.get(col)))
             context[f"{col}_position_label"] = position_label(context[f"{col}_percentile_current_filter"])
     return context
+
+
+
+def _evidence_value_text(value: Any, decimals: int | None = None, suffix: str = "") -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "n/a"
+    if isinstance(value, bool):
+        text = str(value)
+    elif isinstance(value, (int, float)):
+        if decimals is None:
+            decimals = 0 if isinstance(value, int) else 1
+        text = f"{float(value):,.{decimals}f}"
+    else:
+        text = str(value)
+    return f"{text}{suffix}"
+
+
+def build_evidence_items(context: dict) -> list[dict]:
+    """Create a compact evidence registry that links AI statements back to visible dashboard data."""
+    items: list[dict] = []
+
+    def add(label: str, value: Any, source: str, field: str = "", anchor: str = "source-current-view", decimals: int | None = None, suffix: str = "") -> None:
+        if value is None:
+            return
+        if isinstance(value, float) and pd.isna(value):
+            return
+        items.append(
+            {
+                "id": f"E{len(items) + 1}",
+                "label": label,
+                "value": clean_value(value),
+                "display_value": _evidence_value_text(value, decimals, suffix),
+                "source": source,
+                "field": field,
+                "anchor": anchor,
+            }
+        )
+
+    view = context.get("view_type")
+
+    if view == "Overview":
+        add("Universities in current filter", context.get("number_of_universities"), "Overview summary", "number_of_universities", "source-overview-summary", 0)
+        add("Average overall score", context.get("average_overall_score"), "Overview summary", "average_overall_score", "source-overview-summary", 1)
+        add("Average teaching score", context.get("average_teaching_score"), "Overview profile", "average_teaching_score", "source-overview-profile", 1)
+        add("Average placement score", context.get("average_placement_score"), "Overview profile", "average_placement_score", "source-overview-profile", 1)
+        add("Average research score", context.get("average_research_score"), "Overview profile", "average_research_score", "source-overview-profile", 1)
+        add("Average financial score", context.get("average_financial_score"), "Overview profile", "average_financial_score", "source-overview-profile", 1)
+        add("Average DEA-VRS efficiency", context.get("average_dea_vrs_efficiency"), "Overview profile", "average_dea_vrs_efficiency", "source-overview-profile", 1)
+
+    elif view == "University Comparison" and context.get("university_a") and context.get("university_b"):
+        a = context["university_a"]
+        b = context["university_b"]
+        gaps = context.get("score_gaps_a_minus_b", {})
+        add(f"{a.get('university')} overall score", a.get("overall_score"), "Comparison summary", "university_a.overall_score", "source-comparison-summary", 1)
+        add(f"{b.get('university')} overall score", b.get("overall_score"), "Comparison summary", "university_b.overall_score", "source-comparison-summary", 1)
+        add("Overall score gap (A-B)", gaps.get("overall_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.overall_gap_a_minus_b", "source-comparison-scores", 1)
+        add("Teaching score gap (A-B)", gaps.get("teaching_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.teaching_gap_a_minus_b", "source-comparison-scores", 1)
+        add("Placement score gap (A-B)", gaps.get("placement_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.placement_gap_a_minus_b", "source-comparison-scores", 1)
+        add("Research score gap (A-B)", gaps.get("research_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.research_gap_a_minus_b", "source-comparison-scores", 1)
+        add("Financial score gap (A-B)", gaps.get("financial_gap_a_minus_b"), "Score gaps", "score_gaps_a_minus_b.financial_gap_a_minus_b", "source-comparison-scores", 1)
+
+    elif view == "Finance Explorer":
+        add(context.get("finance_x_axis", "Selected financial indicator"), context.get("selected_x_value"), "Selected scatterplot point", "selected_x_value", "source-finance-scatter", 2)
+        add(context.get("score_y_axis", "Selected score"), context.get("selected_y_value"), "Selected scatterplot point", "selected_y_value", "source-finance-scatter", 1)
+        add("X-axis median in current filter", context.get("x_axis_median_current_filter"), "Finance scatterplot benchmark", "x_axis_median_current_filter", "source-finance-scatter", 2)
+        add("Y-axis median in current filter", context.get("y_axis_median_current_filter"), "Finance scatterplot benchmark", "y_axis_median_current_filter", "source-finance-scatter", 1)
+        add("X-axis percentile in current filter", context.get("x_axis_percentile_current_filter"), "Finance scatterplot position", "x_axis_percentile_current_filter", "source-finance-scatter", 0, "th percentile")
+        add("Y-axis percentile in current filter", context.get("y_axis_percentile_current_filter"), "Finance scatterplot position", "y_axis_percentile_current_filter", "source-finance-scatter", 0, "th percentile")
+        add("FFO per student", context.get("ffo_per_student"), "Finance summary cards", "ffo_per_student", "source-finance-summary", 0)
+        add("Operating cost per student", context.get("operating_cost_per_student"), "Finance summary cards", "operating_cost_per_student", "source-finance-summary", 0)
+        add("Personnel cost share", context.get("personnel_cost_share"), "Finance summary cards", "personnel_cost_share", "source-finance-summary", 2)
+        add("Public revenue share", context.get("public_revenue_share"), "Finance summary cards", "public_revenue_share", "source-finance-summary", 2)
+
+    elif view == "DEA Efficiency Explorer":
+        add("DEA-VRS efficiency", context.get("dea_vrs_efficiency_100"), "DEA summary", "dea_vrs_efficiency_100", "source-dea-summary", 1)
+        add("DEA-CRS efficiency", context.get("dea_crs_efficiency_100"), "DEA summary", "dea_crs_efficiency_100", "source-dea-summary", 1)
+        add("Scale efficiency", context.get("dea_scale_efficiency_100"), "DEA summary", "dea_scale_efficiency_100", "source-dea-summary", 1)
+        add("Overall score", context.get("overall_score"), "DEA vs performance context", "overall_score", "source-dea-summary", 1)
+        add("DEA-VRS percentile in current filter", context.get("dea_vrs_efficiency_100_percentile_current_filter"), "DEA current-filter position", "dea_vrs_efficiency_100_percentile_current_filter", "source-dea-scatter", 0, "th percentile")
+        add("Efficiency category", context.get("efficiency_category"), "DEA summary", "efficiency_category", "source-dea-summary")
+
+    elif view == "Ranking Explorer":
+        add(context.get("metric", "Selected ranking metric"), context.get("selected_value"), "Ranking summary", "selected_value", "source-ranking-summary", 1)
+        add("Rank in current filter", context.get("selected_rank_in_current_filter"), "Ranking summary", "selected_rank_in_current_filter", "source-ranking-summary", 0)
+        add("Percentile in current filter", context.get("selected_percentile_current_filter"), "Ranking summary", "selected_percentile_current_filter", "source-ranking-summary", 0, "th percentile")
+        add("Universities in current ranking", context.get("number_of_universities"), "Ranking summary", "number_of_universities", "source-ranking-summary", 0)
+
+    elif view == "Time Dynamics / What Changed":
+        starts = context.get("start_values", {})
+        ends = context.get("end_values", {})
+        changes = context.get("changes_end_minus_start", {})
+        add(f"Overall score in {context.get('start_year')}", starts.get("overall_score"), "Time comparison", "start_values.overall_score", "source-time-change", 1)
+        add(f"Overall score in {context.get('end_year')}", ends.get("overall_score"), "Time comparison", "end_values.overall_score", "source-time-change", 1)
+        add("Overall score change", changes.get("overall_score"), "Change by dimension", "changes_end_minus_start.overall_score", "source-time-change", 1)
+        largest = context.get("largest_change_dimension")
+        if largest:
+            add(f"Largest change: {str(largest).replace('_', ' ')}", changes.get(largest), "Change by dimension", f"changes_end_minus_start.{largest}", "source-time-change", 1)
+        add("Teaching score change", changes.get("teaching_score"), "Change by dimension", "changes_end_minus_start.teaching_score", "source-time-change", 1)
+        add("Research score change", changes.get("research_score"), "Change by dimension", "changes_end_minus_start.research_score", "source-time-change", 1)
+        add("Financial score change", changes.get("financial_score"), "Change by dimension", "changes_end_minus_start.financial_score", "source-time-change", 1)
+
+    elif view == "Teaching and Research":
+        add("Teaching score", context.get("teaching_score"), "Teaching and research profile", "teaching_score", "source-teaching-summary", 1)
+        add("Placement score", context.get("placement_score"), "Teaching and research profile", "placement_score", "source-teaching-summary", 1)
+        add("Research score", context.get("research_score"), "Teaching and research profile", "research_score", "source-teaching-summary", 1)
+        add("Teaching percentile in current filter", context.get("teaching_score_percentile_current_filter"), "Teaching vs research positioning", "teaching_score_percentile_current_filter", "source-teaching-research", 0, "th percentile")
+        add("Research percentile in current filter", context.get("research_score_percentile_current_filter"), "Teaching vs research positioning", "research_score_percentile_current_filter", "source-teaching-research", 0, "th percentile")
+        add("Second-year retention", context.get("second_year_retention_pct"), "Teaching indicators", "second_year_retention_pct", "source-teaching-indicators", 1, "%")
+        add("Publications per teaching staff", context.get("publications_per_teaching_staff"), "Research indicators", "publications_per_teaching_staff", "source-teaching-indicators", 2)
+
+    elif view == "Data and Methodology":
+        add("Dataset scope", context.get("dataset_scope"), "Data and Methodology", "dataset_scope", "source-methodology")
+        add("Current filtered universities", context.get("current_filter_count"), "Data and Methodology", "current_filter_count", "source-methodology", 0)
+        add("Score definition", context.get("score_definition"), "Data and Methodology", "score_definition", "source-methodology")
+
+    else:  # University Profile and other single-university pages
+        add("Overall score", context.get("overall_score"), "University profile summary", "overall_score", "source-profile-summary", 1)
+        add("Overall rank", context.get("overall_rank_year"), "University profile summary", "overall_rank_year", "source-profile-summary", 0)
+        add("Teaching score", context.get("teaching_score"), "Dimension profile", "teaching_score", "source-profile-dimensions", 1)
+        add("Placement score", context.get("placement_score"), "Dimension profile", "placement_score", "source-profile-dimensions", 1)
+        add("Research score", context.get("research_score"), "Dimension profile", "research_score", "source-profile-dimensions", 1)
+        add("Financial score", context.get("financial_score"), "Dimension profile", "financial_score", "source-profile-dimensions", 1)
+        add("National average overall score", context.get("national_avg_overall_score"), "Benchmark comparison", "national_avg_overall_score", "source-profile-benchmark", 1)
+        add("Macro-area average overall score", context.get("macro_area_avg_overall_score"), "Benchmark comparison", "macro_area_avg_overall_score", "source-profile-benchmark", 1)
+
+    return items
+
+
+def extract_evidence_ids(answer: str, evidence_items: list[dict]) -> list[str]:
+    valid = {item["id"] for item in evidence_items}
+    seen: list[str] = []
+    for evidence_id in re.findall(r"\[(E\d+)\]", answer or ""):
+        if evidence_id in valid and evidence_id not in seen:
+            seen.append(evidence_id)
+    return seen
+
+
+def linkify_evidence_citations(answer: str, evidence_items: list[dict]) -> str:
+    anchors = {item["id"]: item.get("anchor", "source-current-view") for item in evidence_items}
+
+    def repl(match: re.Match) -> str:
+        evidence_id = match.group(1)
+        anchor = anchors.get(evidence_id)
+        if not anchor:
+            return match.group(0)
+        return f"[{evidence_id}](#{anchor})"
+
+    return re.sub(r"\[(E\d+)\]", repl, answer or "")
+
+
+def ensure_evidence_references(answer: str, evidence_items: list[dict]) -> str:
+    if not evidence_items:
+        return answer
+    if extract_evidence_ids(answer, evidence_items):
+        return answer
+    refs = " ".join(f"[{item['id']}]" for item in evidence_items[:6])
+    return f"{answer.rstrip()}\n\n**Linked evidence from the current view:** {refs}"
+
+
+def render_evidence_registry(evidence_items: list[dict], answer: str = "") -> None:
+    if not evidence_items:
+        return
+    cited = extract_evidence_ids(answer, evidence_items)
+    shown = [item for item in evidence_items if item["id"] in cited] if cited else evidence_items[:6]
+    st.markdown("#### Evidence linked to the interpretation")
+    st.caption("Evidence references in the Companion are clickable and return to the corresponding dashboard section.")
+    for item in shown:
+        label = html.escape(str(item["label"]))
+        value = html.escape(str(item["display_value"]))
+        source = html.escape(str(item["source"]))
+        field = html.escape(str(item.get("field", "")))
+        st.markdown(
+            f"<div class='evidence-card'><span class='evidence-id'>{item['id']}</span>"
+            f"<b>{label}</b><br><span>{value}</span><br>"
+            f"<span class='small-note'>Source: {source} · field: {field}</span></div>",
+            unsafe_allow_html=True,
+        )
 
 
 def gap_direction(gap: float, threshold: float = 5.0) -> str:
@@ -952,8 +1226,11 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
     except Exception:
         api_key = None
 
+    evidence_items = context.get("evidence_items", [])
+
     if OpenAI is None or not is_valid_api_key(api_key):
-        return generate_local_interpretation(context, user_question)
+        local_answer = generate_local_interpretation(context, user_question)
+        return ensure_evidence_references(local_answer, evidence_items)
 
     client = OpenAI(api_key=api_key.strip())
     prompt = {
@@ -969,6 +1246,9 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
             "For Finance Explorer, focus on financial indicators and scatterplot axes. For Teaching and Research, focus on teaching/research indicators. For Overview, focus on filtered system-level patterns. For University Comparison, focus on the two selected universities. For Ranking Explorer, focus on ranking position and metric choice. For Time Dynamics, focus on changes between years. For DEA Efficiency Explorer, focus on DEA-VRS, CRS, scale efficiency and resource-to-output interpretation.",
             "Write analysis, not a list of visible numbers. Use a few key numbers only when they support an interpretation.",
             "Use computed percentiles, medians, gap labels, and cluster-position fields whenever they are available.",
+            "The context contains an evidence_items registry. For every key quantitative or comparative claim, append one or more evidence IDs in square brackets, for example [E1] or [E2][E3]. Use only IDs that exist in evidence_items.",
+            "Evidence IDs are not decorative citations: each one links the explanation back to the visible dashboard section from which the value came.",
+            "If interaction_selection is present, treat the chart-clicked university as the explicit user-selected observation and keep the interpretation grounded in that selected mark.",
             "Explain what the pattern means for the current page: profile shape, trade-offs, benchmark position, specialization, outlier behavior, or balance between dimensions.",
             "Use phrases such as: this suggests, this indicates, this points to, this should be read as, but do not state causality.",
             "Return: analytical summary, interpretation of the main pattern, strengths/trade-offs, what to inspect next, and limitation.",
@@ -981,9 +1261,10 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
             model="gpt-4.1-mini",
             input=json.dumps(prompt, ensure_ascii=True),
         )
-        return response.output_text
+        return ensure_evidence_references(response.output_text, evidence_items)
     except Exception:
-        return generate_local_interpretation(context, user_question)
+        local_answer = generate_local_interpretation(context, user_question)
+        return ensure_evidence_references(local_answer, evidence_items)
 
 
 def score_bar_chart(score_df: pd.DataFrame) -> alt.Chart:
@@ -1061,9 +1342,23 @@ if filtered.empty:
     st.error("No universities match the selected filters. Please change the filters.")
     st.stop()
 
+university_options = sorted(filtered["university"].unique())
+st.session_state["_current_university_options"] = university_options
+if (
+    "university_selector" not in st.session_state
+    or st.session_state["university_selector"] not in university_options
+):
+    st.session_state["university_selector"] = university_options[0]
+    st.session_state["chart_selection_meta"] = None
+
 with st.sidebar:
-    university = st.selectbox("University", sorted(filtered["university"].unique()))
-    st.caption("Tip: choose the page first, then press Analyze current view.")
+    university = st.selectbox(
+        "University",
+        university_options,
+        key="university_selector",
+        on_change=on_sidebar_university_change,
+    )
+    st.caption("Tip: on Finance and DEA pages you can also click a scatterplot point to select a university.")
 
 selected = filtered[filtered["university"] == university].iloc[0]
 
@@ -1096,6 +1391,7 @@ with main_col:
 
     if page == "Overview":
         active_context = make_overview_context(filtered, year, macro_area, region, size_class)
+        st.markdown("<div id='source-overview-summary'></div>", unsafe_allow_html=True)
         st.markdown("### System overview")
         st.caption("This page summarizes the universities that match the current filters and shows the overall distribution of dashboard-based profile scores.")
         o1, o2, o3, o4 = st.columns(4)
@@ -1137,6 +1433,7 @@ with main_col:
             st.markdown("#### Top 10 universities by overall score")
             st.altair_chart(top_chart, width="stretch")
         with c2:
+            st.markdown("<div id='source-overview-profile'></div>", unsafe_allow_html=True)
             st.markdown("#### Average profile by macro-area")
             st.altair_chart(macro_chart, width="stretch")
 
@@ -1156,6 +1453,7 @@ with main_col:
     elif page == "University Profile":
         active_context = selected_context(selected, page)
         active_context = add_profile_position_context(active_context, filtered, selected)
+        st.markdown("<div id='source-profile-summary'></div>", unsafe_allow_html=True)
         st.markdown("### University profile")
         st.caption("This page focuses on one selected university and compares its overall profile with national and macro-area averages.")
         k1, k2, k3, k4, k5 = st.columns(5)
@@ -1193,9 +1491,11 @@ with main_col:
 
         c1, c2 = st.columns(2)
         with c1:
+            st.markdown("<div id='source-profile-dimensions'></div>", unsafe_allow_html=True)
             st.markdown("#### Performance profile")
             st.altair_chart(score_bar_chart(make_score_profile(selected)), width="stretch")
         with c2:
+            st.markdown("<div id='source-profile-benchmark'></div>", unsafe_allow_html=True)
             st.markdown("#### Benchmark comparison")
             st.altair_chart(benchmark_chart(selected), width="stretch")
 
@@ -1221,6 +1521,7 @@ with main_col:
         st.altair_chart(trend_chart, width="stretch")
 
     elif page == "University Comparison":
+        st.markdown("<div id='source-comparison-summary'></div>", unsafe_allow_html=True)
         st.markdown("### University comparison")
         st.caption("Select two universities in the same year and compare their scores, ranks, financial indicators, and time trends. The comparison is exploratory and does not imply causality.")
 
@@ -1305,6 +1606,7 @@ with main_col:
             )
             gc1, gc2 = st.columns(2)
             with gc1:
+                st.markdown("<div id='source-comparison-scores'></div>", unsafe_allow_html=True)
                 st.markdown("#### Side-by-side score profile")
                 st.altair_chart(comp_chart, width="stretch")
             with gc2:
@@ -1347,6 +1649,7 @@ with main_col:
 
     elif page == "Finance Explorer":
         active_context = selected_context(selected, page)
+        st.markdown("<div id='source-finance-summary'></div>", unsafe_allow_html=True)
         st.markdown("### Finance explorer")
         st.caption("Use this page to explore observed relationships between financial indicators and profile scores. The scatterplot is exploratory and does not imply causality.")
 
@@ -1387,6 +1690,12 @@ with main_col:
 
         scatter_data = filtered.copy()
         scatter_data["selected_flag"] = scatter_data["university"].eq(university)
+        finance_point_selection = alt.selection_point(
+            name="finance_point_selection",
+            fields=["university"],
+            on="click",
+            clear="dblclick",
+        )
         base_scatter = (
             alt.Chart(scatter_data)
             .mark_circle(size=85, opacity=0.65)
@@ -1403,6 +1712,7 @@ with main_col:
                     alt.Tooltip(f"{y_col}:Q", title=score_label_choice, format=".1f"),
                 ],
             )
+            .add_params(finance_point_selection)
             .interactive()
         )
         selected_point = (
@@ -1415,8 +1725,22 @@ with main_col:
             .mark_text(align="left", dx=10, dy=-10, fontSize=12, fontWeight="bold")
             .encode(x=alt.X(f"{x_col}:Q"), y=alt.Y(f"{y_col}:Q"), text="university:N")
         )
+        st.markdown("<div id='source-finance-scatter'></div>", unsafe_allow_html=True)
         st.markdown("#### Financial indicator vs selected score")
-        st.altair_chart((base_scatter + selected_point + selected_label).properties(height=380), width="stretch")
+        st.caption("Click any university point to make it the active dashboard selection. The sidebar, highlighted point, and Analysis Companion will update together.")
+        st.altair_chart(
+            (base_scatter + selected_point + selected_label).properties(height=380),
+            key="finance_scatter_chart",
+            on_select=on_finance_scatter_select,
+            selection_mode=["finance_point_selection"],
+            width="stretch",
+        )
+        finance_selection_meta = st.session_state.get("chart_selection_meta") or {}
+        if (
+            finance_selection_meta.get("source_page") == "Finance Explorer"
+            and finance_selection_meta.get("university") == university
+        ):
+            st.success(f"Selected from the Finance scatterplot: {university}. This selection is now linked to the Analysis Companion.")
 
         finance_indicators = {
             "personnel_cost_share": "Personnel cost share",
@@ -1425,12 +1749,14 @@ with main_col:
             "performance_quota_share": "Performance quota share",
             "economic_financial_sustainability_index": "Economic-financial sustainability index",
         }
+        st.markdown("<div id='source-finance-indicators'></div>", unsafe_allow_html=True)
         st.markdown("#### Selected university financial structure")
         st.altair_chart(make_indicator_bar(selected, finance_indicators), width="stretch")
 
 
     elif page == "DEA Efficiency Explorer":
         active_context = make_dea_context(filtered, selected)
+        st.markdown("<div id='source-dea-summary'></div>", unsafe_allow_html=True)
         st.markdown("### DEA efficiency explorer")
         st.caption("This page adds an exploratory DEA efficiency layer. DEA-VRS is the main score because universities differ in size and scale.")
 
@@ -1465,6 +1791,12 @@ with main_col:
 
             dea_data = filtered.copy()
             dea_data["selected_flag"] = dea_data["university"].eq(university)
+            dea_point_selection = alt.selection_point(
+                name="dea_point_selection",
+                fields=["university"],
+                on="click",
+                clear="dblclick",
+            )
             dea_scatter = (
                 alt.Chart(dea_data)
                 .mark_circle(size=90, opacity=0.65)
@@ -1475,6 +1807,7 @@ with main_col:
                     size=alt.Size("enrolled_students:Q", title="Enrolled students"),
                     tooltip=["university", "region", "macro_area", alt.Tooltip(f"{dea_x_col}:Q", title=dea_x_label, format=",.2f"), alt.Tooltip("dea_vrs_efficiency_100:Q", title="DEA-VRS", format=".1f")],
                 )
+                .add_params(dea_point_selection)
                 .interactive()
             )
             selected_dea_point = (
@@ -1487,7 +1820,22 @@ with main_col:
                 .mark_text(align="left", dx=10, dy=-10, fontSize=12, fontWeight="bold")
                 .encode(x=alt.X(f"{dea_x_col}:Q"), y=alt.Y("dea_vrs_efficiency_100:Q"), text="university:N")
             )
-            st.altair_chart((dea_scatter + selected_dea_point + selected_dea_label).properties(height=390), width="stretch")
+            st.markdown("<div id='source-dea-scatter'></div>", unsafe_allow_html=True)
+            st.markdown("#### DEA efficiency vs selected variable")
+            st.caption("Click any university point to select it directly from the DEA view. The sidebar, highlighted point, DEA context, and Analysis Companion will update together.")
+            st.altair_chart(
+                (dea_scatter + selected_dea_point + selected_dea_label).properties(height=390),
+                key="dea_scatter_chart",
+                on_select=on_dea_scatter_select,
+                selection_mode=["dea_point_selection"],
+                width="stretch",
+            )
+            dea_selection_meta = st.session_state.get("chart_selection_meta") or {}
+            if (
+                dea_selection_meta.get("source_page") == "DEA Efficiency Explorer"
+                and dea_selection_meta.get("university") == university
+            ):
+                st.success(f"Selected from the DEA scatterplot: {university}. This selection is now linked to the Analysis Companion.")
 
             dc1, dc2 = st.columns(2)
             with dc1:
@@ -1537,6 +1885,7 @@ with main_col:
             st.info("DEA efficiency is a benchmarking result based on selected inputs and outputs. It should not be interpreted as a causal estimate or final policy judgment.")
 
     elif page == "Ranking Explorer":
+        st.markdown("<div id='source-ranking-summary'></div>", unsafe_allow_html=True)
         st.markdown("### Ranking explorer")
         st.caption("Rank universities by any dashboard score or DEA efficiency measure within the current filters.")
         metric_options = {
@@ -1599,6 +1948,7 @@ with main_col:
             )
             .properties(height=max(330, 28 * len(rank_chart_data)))
         )
+        st.markdown("<div id='source-ranking-chart'></div>", unsafe_allow_html=True)
         st.markdown(f"#### Top {top_n} universities by {ranking_metric_label}")
         st.altair_chart(rank_chart, width="stretch")
 
@@ -1615,6 +1965,7 @@ with main_col:
         st.dataframe(ranked[show_cols].copy(), width="stretch", hide_index=True)
 
     elif page == "Time Dynamics / What Changed":
+        st.markdown("<div id='source-time-change'></div>", unsafe_allow_html=True)
         st.markdown("### Time dynamics / What changed?")
         st.caption("Compare how the selected university changed between two years and identify which dimension moved the most.")
         all_years = sorted(df["year"].unique())
@@ -1685,6 +2036,7 @@ with main_col:
                     )
                     .properties(height=330)
                 )
+                st.markdown("<div id='source-time-trend'></div>", unsafe_allow_html=True)
                 st.markdown("#### Full trend, 2020-2023")
                 st.altair_chart(trend_chart, width="stretch")
 
@@ -1702,6 +2054,7 @@ with main_col:
     elif page == "Teaching and Research":
         active_context = selected_context(selected, page)
         active_context = add_teaching_research_position_context(active_context, filtered, selected)
+        st.markdown("<div id='source-teaching-summary'></div>", unsafe_allow_html=True)
         st.markdown("### Teaching and research profile")
         st.caption("This page separates teaching, placement, and research indicators so that the profile is not reduced to a single ranking.")
         teaching_indicators = {
@@ -1720,6 +2073,7 @@ with main_col:
         }
         tr1, tr2 = st.columns(2)
         with tr1:
+            st.markdown("<div id='source-teaching-indicators'></div>", unsafe_allow_html=True)
             st.markdown("#### Teaching and placement indicators")
             st.altair_chart(make_indicator_bar(selected, teaching_indicators), width="stretch")
         with tr2:
@@ -1743,6 +2097,7 @@ with main_col:
             .mark_circle(size=260, fillOpacity=0, stroke="black", strokeWidth=3)
             .encode(x="teaching_score:Q", y="research_score:Q")
         )
+        st.markdown("<div id='source-teaching-research'></div>", unsafe_allow_html=True)
         st.markdown("#### Teaching vs research positioning")
         st.altair_chart((teaching_research_scatter + selected_tr).properties(height=360), width="stretch")
 
@@ -1757,6 +2112,7 @@ with main_col:
             "region_filter": region,
             "size_class_filter": size_class,
         }
+        st.markdown("<div id='source-methodology'></div>", unsafe_allow_html=True)
         st.markdown("### Data and methodology")
         st.markdown(
             "The dashboard uses a curated prototype dataset covering 61 Italian universities over 2020-2023. "
@@ -1775,9 +2131,27 @@ with main_col:
         )
         st.dataframe(filtered.sort_values("overall_score", ascending=False), width="stretch", hide_index=True)
 
+# Attach interaction provenance when the current university was chosen directly from a chart.
+chart_selection_meta = st.session_state.get("chart_selection_meta") or {}
+if (
+    chart_selection_meta.get("university") == university
+    and chart_selection_meta.get("source_page") == page
+):
+    active_context["interaction_selection"] = dict(chart_selection_meta)
+
+# Build the evidence registry after all page-specific controls have defined the active context.
+# This makes the dashboard -> Companion link explicit and keeps the evidence synchronized
+# with year, university, filters, selected axes, ranking metric, and comparison choices.
+active_context["evidence_items"] = build_evidence_items(active_context)
+
 with ai_col:
     st.subheader("AI Analysis Companion")
     st.caption("The assistant analyzes only the currently selected dashboard page.")
+    st.markdown(
+        "<div class='context-link-note'><b>Live dashboard context is linked.</b> "
+        "Changing the university, year, filters, axes, ranking metric, or comparison automatically changes the data sent to the Companion and clears the previous interpretation.</div>",
+        unsafe_allow_html=True,
+    )
 
     question = st.text_area(
         "Optional question",
@@ -1789,9 +2163,13 @@ with ai_col:
         st.session_state.ai_answer = ""
     if "last_ai_signature" not in st.session_state:
         st.session_state.last_ai_signature = ""
+    if "ai_auto_cache" not in st.session_state:
+        st.session_state.ai_auto_cache = {}
 
     signature = json.dumps(active_context, ensure_ascii=True, sort_keys=True, default=str)
-    if signature != st.session_state.last_ai_signature:
+    context_changed = signature != st.session_state.last_ai_signature
+    if context_changed:
+        # The visible explanation must always correspond to the current analytical state.
         st.session_state.ai_answer = ""
         st.session_state.last_ai_signature = signature
 
@@ -1820,12 +2198,61 @@ with ai_col:
             unsafe_allow_html=True,
         )
 
-    if st.button("Analyze current page", type="primary"):
-        with st.spinner("Generating page-specific interpretation..."):
-            st.session_state.ai_answer = generate_ai_interpretation(active_context, question or None)
+    interaction_selection = active_context.get("interaction_selection")
+    if interaction_selection:
+        st.caption(
+            f"Interactive selection source: {interaction_selection.get('source_page')} scatterplot → "
+            f"{interaction_selection.get('university')}. The Companion is analyzing the chart-selected observation."
+        )
+
+    with st.expander("Linked data from current view", expanded=False):
+        evidence_df = pd.DataFrame(active_context.get("evidence_items", []))
+        if not evidence_df.empty:
+            visible_cols = [c for c in ["id", "label", "display_value", "source", "field"] if c in evidence_df.columns]
+            st.dataframe(evidence_df[visible_cols], width="stretch", hide_index=True)
+        else:
+            st.caption("No evidence items are available for this view.")
+
+    auto_analysis = st.toggle(
+        "Automatic analysis",
+        value=True,
+        help=(
+            "When enabled, the Companion automatically regenerates its interpretation whenever the "
+            "dashboard analytical state changes, including chart-point selections, filters, axes, year, "
+            "ranking metric, or comparison choices."
+        ),
+        key="auto_analysis_enabled",
+    )
+
+    # Automatic dashboard -> Companion execution. The context signature changes only when the
+    # analytical state changes; typing in the optional question does not trigger an API call.
+    # Previously generated automatic answers are cached per analytical state to avoid repeated calls
+    # when a user navigates back to a context already analyzed during the same session.
+    if auto_analysis and (context_changed or not st.session_state.ai_answer):
+        cached_answer = st.session_state.ai_auto_cache.get(signature)
+        if cached_answer:
+            st.session_state.ai_answer = cached_answer
+        else:
+            with st.spinner("Updating interpretation for the current dashboard selection..."):
+                auto_answer = generate_ai_interpretation(active_context, None)
+            st.session_state.ai_answer = auto_answer
+            st.session_state.ai_auto_cache[signature] = auto_answer
+            # Keep the in-session cache bounded.
+            if len(st.session_state.ai_auto_cache) > 24:
+                oldest_key = next(iter(st.session_state.ai_auto_cache))
+                st.session_state.ai_auto_cache.pop(oldest_key, None)
+
+    # A manual follow-up remains available only when the user wants to ask a specific question.
+    # It is no longer required for the normal page interpretation.
+    if question.strip():
+        if st.button("Ask follow-up", type="secondary"):
+            with st.spinner("Answering the follow-up in the current dashboard context..."):
+                st.session_state.ai_answer = generate_ai_interpretation(active_context, question.strip())
 
     if st.session_state.ai_answer:
-        st.markdown(st.session_state.ai_answer)
+        linked_answer = linkify_evidence_citations(st.session_state.ai_answer, active_context.get("evidence_items", []))
+        st.markdown(linked_answer)
+        render_evidence_registry(active_context.get("evidence_items", []), st.session_state.ai_answer)
 
     with st.expander("Current AI input"):
         st.json(active_context)
