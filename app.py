@@ -84,13 +84,13 @@ st.markdown(
         padding: 1rem;
         background: rgba(250, 250, 250, 0.65);
     }
-    .evidence-card {
-        border: 1px solid rgba(49, 51, 63, 0.14);
-        border-radius: 10px;
-        padding: 0.72rem 0.85rem;
-        margin: 0.45rem 0;
-        background: rgba(250, 250, 250, 0.72);
+    .context-link-note {
+        border-left: 3px solid rgba(49, 51, 63, 0.35);
+        padding-left: 0.75rem;
+        margin: 0.25rem 0 0.8rem 0;
+        color: #5b606b;
+        font-size: 0.9rem;
     }
-    .evidence-id {
-        display: inline-block;
-        min-width: 2.2rem;
+    .focus-callout {
+        border: 2px solid rgba(49, 51, 63, 0.55);
+        border-radius: 10px;
