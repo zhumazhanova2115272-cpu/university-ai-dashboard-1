@@ -1319,25 +1319,43 @@ def select_required_evidence_items(context: dict, evidence_items: list[dict]) ->
     return selected
 
 
-def ensure_required_evidence_coverage(answer: str, required_items: list[dict], all_items: list[dict]) -> str:
-    """Guarantee that every required quantitative item is available in the Companion prose.
+def annotate_inline_evidence_ids(answer: str, evidence_items: list[dict]) -> str:
+    """Attach internal evidence IDs only to values that already appear in the prose.
 
-    The model is asked to weave the values into the analysis naturally. If it omits any required
-    item, a compact key-values paragraph is appended. Internal source IDs remain in the stored
-    response so numeric values can be mapped back to their visual locations, but the IDs are
-    hidden from the user interface.
+    This function never appends a separate evidence/key-values paragraph. The IDs are used
+    internally so the existing numeric value can be turned into a clickable deep link, and are
+    hidden before the Companion response is rendered.
     """
-    if not required_items:
-        return answer
-    cited = set(extract_evidence_ids(answer, all_items))
-    missing = [item for item in required_items if item["id"] not in cited]
-    if not missing:
-        return answer
-    fragments = [
-        f"**{item['label']}** = **{item['display_value']}** [{item['id']}]"
-        for item in missing
+    result = answer or ""
+    if not result or not evidence_items:
+        return result
+
+    numeric_items = [
+        item for item in evidence_items
+        if item.get("value") is not None and not isinstance(item.get("value"), str)
     ]
-    return answer.rstrip() + "\n\n**Key values for this interpretation:** " + "; ".join(fragments) + "."
+    counts: dict[str, int] = {}
+    for item in numeric_items:
+        display = str(item.get("display_value", ""))
+        if display:
+            counts[display] = counts.get(display, 0) + 1
+
+    # Only auto-annotate values that map unambiguously to one evidence item.
+    # Repeated values (for example several DEA scores equal to 100.0) are left to the
+    # model-provided [E#] IDs, which disambiguate the intended visual source.
+    for item in numeric_items:
+        display = str(item.get("display_value", ""))
+        evidence_id = str(item.get("id", ""))
+        if not display or not evidence_id or counts.get(display) != 1:
+            continue
+        if re.search(rf"\[{re.escape(evidence_id)}\]", result):
+            continue
+        pattern = rf"(?<![\w\[]){re.escape(display)}(?![\w\]])"
+        match = re.search(pattern, result)
+        if match:
+            result = result[:match.end()] + f" [{evidence_id}]" + result[match.end():]
+
+    return result
 
 
 def extract_evidence_ids(answer: str, evidence_items: list[dict]) -> list[str]:
@@ -3125,13 +3143,12 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
         api_key = None
 
     evidence_items = context.get("evidence_items", [])
-    required_evidence_items = select_required_evidence_items(context, evidence_items)
 
     if OpenAI is None or not is_valid_api_key(api_key):
         local_answer = generate_local_interpretation(context, None)
         if user_question:
             local_answer += local_followup_answer(context, user_question)
-        return ensure_required_evidence_coverage(local_answer, required_evidence_items, evidence_items)
+        return annotate_inline_evidence_ids(local_answer, evidence_items)
 
     client = OpenAI(api_key=api_key.strip())
     prompt = {
@@ -3145,12 +3162,11 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
             "Write in concise academic English.",
             "Return a page-specific interpretation: do not use a generic university profile unless the current page is University Profile.",
             "For Finance Explorer, focus on financial indicators and scatterplot axes. For Teaching and Research, focus on teaching/research indicators. For Overview, focus on filtered system-level patterns. For University Comparison, focus on the two selected universities. For Ranking Explorer, focus on ranking position and metric choice. For Time Dynamics, focus on changes between years. For DEA Efficiency Explorer, focus on DEA-VRS, CRS, scale efficiency and resource-to-output interpretation.",
-            "Write analysis, not a list of visible numbers. Use a few key numbers only when they support an interpretation.",
-            "Use computed percentiles, medians, gap labels, and cluster-position fields whenever they are available.",
-            "The context contains an evidence_items registry. For every quantitative or comparative claim, place the exact visible value in the prose and append its evidence ID immediately after that value, for example 74.2 [E4]. Use only IDs that exist in evidence_items.",
-            "The context also contains required_evidence_items. Every item in required_evidence_items MUST appear in the answer with its label or clear meaning, its exact display_value, and its matching evidence ID. Do not omit a required item merely for brevity.",
-            "Do not cite an evidence ID without stating the corresponding value or category in the same sentence. This is necessary because the value itself becomes clickable in the interface.",
-            "Evidence IDs are not decorative citations: each one links the explanation back to the visible dashboard section from which the value came.",
+            "Write analysis, not a list of visible numbers. Use the quantitative values that are necessary to support the interpretation, but do not dump every available value.",
+            "Use computed percentiles, medians, gap labels, benchmark values and cluster-position fields whenever they materially support the interpretation.",
+            "The context contains an evidence_items registry. Whenever you state a key quantitative value that exists in evidence_items, put the exact visible value in the prose and append its evidence ID immediately after that value, for example 74.2 [E4]. Use only IDs that exist in evidence_items.",
+            "The interface hides the [E#] token and turns the number itself into a clickable link to the corresponding visualization. Therefore the evidence ID must follow the exact numeric value it belongs to.",
+            "Do not create a separate Evidence section, Linked evidence section, Key values section, source list, citation list, or appendix of numbers. All useful quantitative values must appear naturally inside the analytical prose where they are interpreted.",
             "If interaction_selection is present, treat the chart-clicked university as the explicit user-selected observation and keep the interpretation grounded in that selected mark.",
             "If focus_mode is true and interaction_focus is present, switch to FOCUSED MODE. Do not give the normal page-wide overview. Use focus_details as the primary evidence source. At least 70% of the answer must interpret the selected mark or visual; broader page context is allowed only when it helps explain it.",
             "If focus_details.focus_kind is 'visual' or focus_details.mode is 'visual', this is an EXPLAIN-THIS-VISUAL request. Do NOT say merely that the user selected a visual, that the Companion is prioritizing it, or that the mark should be read in context. Instead explain the actual visible pattern using the numerical fields in focus_details: identify the main pattern, quantify the most important comparison, explain what that pattern means on this page, suggest one specific next inspection, and state one limitation. Start with 'Visual analysis — <visual label>'.",
@@ -3159,13 +3175,12 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
             "In FOCUSED MODE on Finance Explorer or Teaching and Research, explain the selected indicator and how it relates to the relevant composite profile; do not turn one indicator into a causal explanation.",
             "In FOCUSED MODE on Time Dynamics, explain the selected dimension's start value, end value, and change before discussing anything else.",
             "Keep focused-mode responses concise (roughly 120-180 words) and omit generic sections that are unrelated to the clicked mark.",
-            "If evidence_focus is present, explicitly address that evidence item because the user clicked its number in the previous Companion explanation.",
+            "If evidence_focus is present, explicitly address that linked value because the user clicked its number in the previous Companion explanation.",
             "Explain what the pattern means for the current page: profile shape, trade-offs, benchmark position, specialization, outlier behavior, or balance between dimensions.",
             "Use phrases such as: this suggests, this indicates, this points to, this should be read as, but do not state causality.",
             "Return: analytical summary, interpretation of the main pattern, strengths/trade-offs, what to inspect next, and limitation.",
         ],
         "current_dashboard_context": context,
-        "required_evidence_items": required_evidence_items,
         "user_question": user_question,
     }
     try:
@@ -3176,12 +3191,14 @@ def generate_ai_interpretation(context: dict, user_question: str | None = None) 
         model_answer = response.output_text
         if _focused_answer_is_too_generic(model_answer, context):
             model_answer = generate_local_interpretation(context, user_question)
-        return ensure_required_evidence_coverage(model_answer, required_evidence_items, evidence_items)
+        # Never append a separate list of evidence values. Only annotate values that already
+        # occur naturally in the prose so they can become clickable in-place.
+        return annotate_inline_evidence_ids(model_answer, evidence_items)
     except Exception:
         local_answer = generate_local_interpretation(context, None)
         if user_question:
             local_answer += local_followup_answer(context, user_question)
-        return ensure_required_evidence_coverage(local_answer, required_evidence_items, evidence_items)
+        return annotate_inline_evidence_ids(local_answer, evidence_items)
 
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=128)
